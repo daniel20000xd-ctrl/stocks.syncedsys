@@ -10,7 +10,7 @@ import {
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
-type Interval = '1M' | '3M' | '6M' | '1Y'
+export type Interval = '1M' | '3M' | '6M' | '1Y'
 
 interface OHLCVBar {
   time: string
@@ -162,18 +162,209 @@ function Stat({ label, value }: { label: string; value: string }) {
   )
 }
 
+// ── Context builder (for Claude via postMessage) ──────────────────────────────
+
+function buildViewerContext(d: StockData): string {
+  const N = (n: number | null, dp = 2) => n == null ? 'N/A' : n.toFixed(dp)
+  const B = (n: number | null): string => {
+    if (n == null) return 'N/A'
+    const a = Math.abs(n)
+    if (a >= 1e12) return `$${(n / 1e12).toFixed(3)}T`
+    if (a >= 1e9)  return `$${(n / 1e9).toFixed(2)}B`
+    if (a >= 1e6)  return `$${(n / 1e6).toFixed(2)}M`
+    if (a >= 1e3)  return `$${(n / 1e3).toFixed(1)}K`
+    return `$${n.toFixed(2)}`
+  }
+  const P = (n: number | null, mul = true) => n == null ? 'N/A' : `${(mul ? n * 100 : n).toFixed(2)}%`
+  const V = (v: number) => v >= 1e9 ? `${(v/1e9).toFixed(2)}B` : v >= 1e6 ? `${(v/1e6).toFixed(2)}M` : v >= 1e3 ? `${(v/1e3).toFixed(0)}K` : String(v)
+  const S = (n: number) => n >= 0 ? `+${n}` : String(n)
+  const lines: string[] = []
+  const h = (t: string) => { lines.push(''); lines.push(t); lines.push('─'.repeat(t.length)) }
+
+  lines.push(`=== STOCK VIEWER: ${d.ticker} (${d.interval}) ===`)
+  lines.push(`Updated: ${new Date().toUTCString()}`)
+
+  h('CURRENT PRICE')
+  lines.push(`  ${d.ticker}  $${d.currentPrice.toFixed(2)}  (${S(d.change)} / ${S(d.changePercent)}%)`)
+  if (d.sector)  lines.push(`  Sector: ${d.sector}  |  Industry: ${d.industry ?? 'N/A'}`)
+  if (d.country) lines.push(`  Country: ${d.country}${d.employees ? `  |  Employees: ${d.employees.toLocaleString()}` : ''}`)
+
+  if (d.description) {
+    h('COMPANY OVERVIEW')
+    const words = d.description.split(' ')
+    let line = '  '
+    for (const w of words) {
+      if ((line + w).length > 100) { lines.push(line); line = '  ' + w + ' ' }
+      else line += w + ' '
+    }
+    if (line.trim()) lines.push(line)
+  }
+
+  h('VALUATION & FUNDAMENTALS')
+  lines.push(`  Market Cap:              ${B(d.marketCap)}`)
+  lines.push(`  Enterprise Value:        ${B(d.enterpriseValue)}`)
+  lines.push(`  Trailing P/E:            ${N(d.peRatio, 1)}×`)
+  lines.push(`  Forward P/E:             ${d.forwardEps && d.currentPrice ? N(d.currentPrice / d.forwardEps, 1) + '×' : 'N/A'}`)
+  lines.push(`  Price/Book:              ${N(d.priceToBook, 2)}×`)
+  lines.push(`  EV/Revenue:              ${N(d.enterpriseToRevenue, 2)}×`)
+  lines.push(`  EV/EBITDA:               ${N(d.enterpriseToEbitda, 2)}×`)
+  lines.push(`  Trailing EPS:            ${d.eps != null ? `$${d.eps}` : 'N/A'}`)
+  lines.push(`  Forward EPS:             ${d.forwardEps != null ? `$${d.forwardEps}` : 'N/A'}`)
+  lines.push(`  Dividend Yield:          ${P(d.dividendYield)}`)
+  lines.push(`  Beta:                    ${N(d.beta, 2)}`)
+  lines.push(`  52-Week High:            ${d.high52w != null ? `$${d.high52w.toFixed(2)}` : 'N/A'}`)
+  lines.push(`  52-Week Low:             ${d.low52w  != null ? `$${d.low52w.toFixed(2)}`  : 'N/A'}`)
+  if (d.nextEarningsDate) lines.push(`  Next Earnings Date:      ${d.nextEarningsDate}`)
+
+  if (d.targetMeanPrice || d.recommendationKey) {
+    h('ANALYST CONSENSUS')
+    lines.push(`  Recommendation:          ${(d.recommendationKey ?? 'N/A').toUpperCase()}`)
+    lines.push(`  # of Analysts:           ${d.numberOfAnalysts ?? 'N/A'}`)
+    lines.push(`  Target Price (mean):     ${d.targetMeanPrice != null ? `$${d.targetMeanPrice.toFixed(2)}` : 'N/A'}`)
+    lines.push(`  Target Price (high):     ${d.targetHighPrice != null ? `$${d.targetHighPrice.toFixed(2)}` : 'N/A'}`)
+    lines.push(`  Target Price (low):      ${d.targetLowPrice  != null ? `$${d.targetLowPrice.toFixed(2)}`  : 'N/A'}`)
+    if (d.targetMeanPrice && d.currentPrice) {
+      lines.push(`  Implied Upside (mean):   ${((d.targetMeanPrice - d.currentPrice) / d.currentPrice * 100).toFixed(1)}%`)
+    }
+  }
+
+  h('PROFITABILITY & MARGINS')
+  lines.push(`  Gross Margin:            ${P(d.grossMargins)}`)
+  lines.push(`  Operating Margin:        ${P(d.operatingMargins)}`)
+  lines.push(`  Profit Margin:           ${P(d.profitMargins)}`)
+  lines.push(`  Return on Equity (ROE):  ${P(d.returnOnEquity)}`)
+  lines.push(`  Return on Assets (ROA):  ${P(d.returnOnAssets)}`)
+  lines.push(`  Revenue Growth (YoY):    ${P(d.revenueGrowth)}`)
+  lines.push(`  Earnings Growth (YoY):   ${P(d.earningsGrowth)}`)
+
+  h('FINANCIAL HEALTH')
+  lines.push(`  Total Revenue:           ${B(d.totalRevenue)}`)
+  lines.push(`  EBITDA:                  ${B(d.ebitda)}`)
+  lines.push(`  Total Cash:              ${B(d.totalCash)}`)
+  lines.push(`  Total Debt:              ${B(d.totalDebt)}`)
+  lines.push(`  Free Cash Flow:          ${B(d.freeCashflow)}`)
+  lines.push(`  Debt/Equity:             ${N(d.debtToEquity, 2)}`)
+
+  h('TECHNICAL INDICATORS')
+  const ind = d.indicators
+  if (ind.rsi != null) {
+    const lbl = ind.rsi > 70 ? 'OVERBOUGHT' : ind.rsi < 30 ? 'OVERSOLD' : 'neutral'
+    lines.push(`  RSI(14):             ${ind.rsi}  [${lbl}]`)
+  }
+  if (ind.macd != null) {
+    lines.push(`  MACD(12/26/9):       ${S(ind.macd)}`)
+    lines.push(`  MACD Signal:         ${ind.macdSignal != null ? S(ind.macdSignal) : 'N/A'}`)
+    lines.push(`  MACD Histogram:      ${ind.macdHistogram != null ? S(ind.macdHistogram) : 'N/A'}`)
+  }
+  if (ind.bbUpper != null) {
+    lines.push(`  Bollinger Upper(20): $${ind.bbUpper.toFixed(2)}`)
+    lines.push(`  Bollinger Lower:     ${ind.bbLower != null ? `$${ind.bbLower.toFixed(2)}` : 'N/A'}`)
+    lines.push(`  BB Width:            ${ind.bbWidth != null ? `${ind.bbWidth.toFixed(2)}%` : 'N/A'}`)
+  }
+  if (d.sma50.length)  lines.push(`  SMA50 (latest):      $${d.sma50[d.sma50.length-1].value.toFixed(2)}`)
+  if (d.sma200.length) lines.push(`  SMA200 (latest):     $${d.sma200[d.sma200.length-1].value.toFixed(2)}`)
+
+  if (d.recommendationTrend.length) {
+    h('ANALYST RECOMMENDATION TREND')
+    lines.push('  Period   StrongBuy  Buy  Hold  Sell  StrongSell')
+    for (const r of d.recommendationTrend)
+      lines.push(`  ${r.period.padEnd(8)} ${String(r.strongBuy).padStart(9)} ${String(r.buy).padStart(4)} ${String(r.hold).padStart(5)} ${String(r.sell).padStart(5)} ${String(r.strongSell).padStart(10)}`)
+  }
+
+  if (d.earningsHistory.length) {
+    h('EARNINGS HISTORY (EPS actual vs estimate)')
+    lines.push('  Quarter      Actual   Estimate  Surprise')
+    for (const e of d.earningsHistory) {
+      const act  = e.epsActual   != null ? `$${e.epsActual.toFixed(2)}`   : 'N/A'
+      const est  = e.epsEstimate != null ? `$${e.epsEstimate.toFixed(2)}` : 'N/A'
+      const surp = e.surprisePct != null ? `${(e.surprisePct * 100).toFixed(1)}%` : 'N/A'
+      lines.push(`  ${e.date.padEnd(12)} ${act.padStart(7)}  ${est.padStart(8)}  ${surp.padStart(8)}`)
+    }
+  }
+
+  if (d.incomeAnnual.length) {
+    h('ANNUAL INCOME STATEMENTS')
+    lines.push('  Fiscal Year   Revenue        Gross Profit    EBIT           Net Income')
+    for (const s of d.incomeAnnual)
+      lines.push(`  ${s.date.padEnd(13)} ${B(s.totalRevenue).padStart(14)} ${B(s.grossProfit).padStart(15)} ${B(s.ebit).padStart(14)} ${B(s.netIncome).padStart(14)}`)
+  }
+
+  if (d.balanceAnnual.length) {
+    h('ANNUAL BALANCE SHEETS')
+    lines.push('  Fiscal Year   Total Assets   Total Liab     Equity         Cash')
+    for (const s of d.balanceAnnual)
+      lines.push(`  ${s.date.padEnd(13)} ${B(s.totalAssets).padStart(14)} ${B(s.totalLiab).padStart(14)} ${B(s.equity).padStart(14)} ${B(s.cash).padStart(14)}`)
+  }
+
+  if (d.cashflowAnnual.length) {
+    h('ANNUAL CASH FLOW STATEMENTS')
+    lines.push('  Fiscal Year   Operating CF   CapEx          Free CF')
+    for (const s of d.cashflowAnnual)
+      lines.push(`  ${s.date.padEnd(13)} ${B(s.operatingCF).padStart(14)} ${B(s.capex).padStart(14)} ${B(s.freeCF).padStart(14)}`)
+  }
+
+  if (d.insiderTransactions.length) {
+    h('RECENT INSIDER TRANSACTIONS (last 15)')
+    for (const t of d.insiderTransactions) {
+      const shares = t.shares != null ? `${t.shares.toLocaleString()} shares` : ''
+      const val    = t.value  != null ? ` (${B(t.value)})` : ''
+      lines.push(`  ${t.date}  ${t.name.padEnd(30)} ${shares}${val}`)
+    }
+  }
+
+  if (d.avanza) {
+    const a = d.avanza
+    h('NORDIC DATA — AVANZA (in SEK)')
+    if (a.marketList) lines.push(`  Market List:             ${a.marketList}`)
+    lines.push(`  P/E: ${N(a.peRatio, 2)}  P/S: ${N(a.psRatio, 2)}  P/B: ${N(a.pbRatio, 2)}  EV/EBIT: ${N(a.evEbit, 2)}`)
+    lines.push(`  Direct Yield: ${P(a.directYield)}  ROE: ${P(a.returnOnEquity)}  ROA: ${P(a.returnOnAssets)}`)
+    lines.push(`  Gross Margin: ${P(a.grossMargin)}  Operating: ${P(a.operatingMargin)}  Net: ${P(a.netMargin)}`)
+    lines.push(`  Market Cap: ${a.marketCap != null ? `${(a.marketCap/1e9).toFixed(2)}B SEK` : 'N/A'}  EPS: ${a.eps != null ? `${a.eps} SEK` : 'N/A'}`)
+    if (a.nextReportDate) lines.push(`  Next Report: ${a.nextReportDate}${a.nextReportType ? ` (${a.nextReportType})` : ''}`)
+  }
+
+  h(`PRICE HISTORY — ${d.ohlcv.length} bars (${d.ohlcv[0]?.time ?? ''} → ${d.ohlcv[d.ohlcv.length-1]?.time ?? ''})`)
+  lines.push('  Date          Open       High       Low        Close      Volume')
+  for (const b of d.ohlcv)
+    lines.push(`  ${b.time}  ${b.open.toFixed(2).padStart(9)}  ${b.high.toFixed(2).padStart(9)}  ${b.low.toFixed(2).padStart(9)}  ${b.close.toFixed(2).padStart(9)}  ${V(b.volume).padStart(8)}`)
+
+  if (d.news.length) {
+    h(`NEWS (${d.news.length} latest)`)
+    d.news.forEach((item, i) => {
+      const sTag = item.sentiment === 'positive' ? '▲ POSITIVE' : item.sentiment === 'negative' ? '▼ NEGATIVE' : '● neutral'
+      lines.push(`  ${i+1}. [${sTag}] ${item.title}`)
+      lines.push(`     ${item.source}  |  ${item.publishedAt}`)
+    })
+  }
+
+  return lines.join('\n')
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 
-export default function StockViewer() {
-  const [tickerInput, setTickerInput] = useState('')
-  const [activeTicker, setActiveTicker] = useState('')
-  const [interval, setIntervalState] = useState<Interval>('1Y')
+interface StockViewerProps {
+  initialTicker?: string
+  initialInterval?: Interval
+  onDataUpdate?: (context: string) => void
+  onConfigUpdate?: (ticker: string, interval: string) => void
+}
+
+export default function StockViewer({ initialTicker, initialInterval, onDataUpdate, onConfigUpdate }: StockViewerProps = {}) {
+  const [tickerInput, setTickerInput] = useState(initialTicker ?? '')
+  const [activeTicker, setActiveTicker] = useState(initialTicker ?? '')
+  const [interval, setIntervalState] = useState<Interval>((initialInterval as Interval) ?? '1Y')
   const [stockData, setStockData] = useState<StockData | null>(null)
   const [loading, setLoading]     = useState(false)
   const [error, setError]         = useState<string | null>(null)
 
   const chartContainerRef = useRef<HTMLDivElement>(null)
   const chartInstanceRef  = useRef<IChartApi | null>(null)
+  const onDataUpdateRef   = useRef(onDataUpdate)
+  const onConfigUpdateRef = useRef(onConfigUpdate)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { onDataUpdateRef.current = onDataUpdate }, [onDataUpdate])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { onConfigUpdateRef.current = onConfigUpdate }, [onConfigUpdate])
 
   // ── Fetch ──────────────────────────────────────────────────────────────────
 
@@ -189,6 +380,7 @@ export default function StockViewer() {
         setStockData(null)
       } else {
         setStockData(json)
+        onDataUpdateRef.current?.(buildViewerContext(json))
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Network error')
@@ -198,17 +390,26 @@ export default function StockViewer() {
     }
   }, [])
 
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (initialTicker) fetchStock(initialTicker.toUpperCase(), (initialInterval as Interval) ?? '1Y')
+  }, [])
+
   function handleSearch(e?: React.FormEvent) {
     e?.preventDefault()
     const t = tickerInput.trim().toUpperCase()
     if (!t) return
     setActiveTicker(t)
     fetchStock(t, interval)
+    onConfigUpdateRef.current?.(t, interval)
   }
 
   function handleInterval(intv: Interval) {
     setIntervalState(intv)
-    if (activeTicker) fetchStock(activeTicker, intv)
+    if (activeTicker) {
+      fetchStock(activeTicker, intv)
+      onConfigUpdateRef.current?.(activeTicker, intv)
+    }
   }
 
   // ── Chart ──────────────────────────────────────────────────────────────────

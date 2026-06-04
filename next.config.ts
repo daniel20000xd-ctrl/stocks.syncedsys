@@ -7,6 +7,19 @@ const nextConfig: NextConfig = {
       static: 300,
     },
   },
+  async headers() {
+    return [
+      {
+        source: "/(.*)",
+        headers: [
+          {
+            key: "Content-Security-Policy",
+            value: "frame-ancestors 'self' https://syncedsys.com",
+          },
+        ],
+      },
+    ]
+  },
 };
 
 export default nextConfig;
