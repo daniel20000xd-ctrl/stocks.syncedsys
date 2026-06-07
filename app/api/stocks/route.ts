@@ -272,6 +272,7 @@ export async function GET(req: NextRequest) {
     let debtToEquity:Num=null, currentRatio:Num=null, quickRatio:Num=null
     let totalCash:Num=null, totalDebt:Num=null, freeCashflow:Num=null, operatingCashflow:Num=null
     let totalRevenue:Num=null, grossProfits:Num=null, ebitda:Num=null
+    let companyName:string|null=null
     let description:string|null=null, sector:string|null=null, industry:string|null=null
     let employees:Num=null, website:string|null=null, country:string|null=null
     let nextEarningsDate:string|null=null
@@ -311,6 +312,7 @@ export async function GET(req: NextRequest) {
       if (q.bookValue != null)                    bookValue     = r2(q.bookValue as number)
       if (q.beta != null)                         beta          = Math.round((q.beta as number) * 100) / 100
       if (q.marketCap != null)                    enterpriseValue = q.marketCap as number
+      companyName = (q.shortName ?? q.longName ?? q.displayName ?? null) as string | null
     }
 
     // ── Parse batch 1 ────────────────────────────────────────────────────────
@@ -324,6 +326,7 @@ export async function GET(req: NextRequest) {
       const ce = s.calendarEvents       ?? {}
       const mh = s.majorHoldersBreakdown ?? {}
 
+      companyName   = companyName ?? (p.longName as string|undefined) ?? (p.shortName as string|undefined) ?? null
       currentPrice  = r2(raw(p,  'regularMarketPrice')         ?? currentPrice)
       prevClose     = r2(raw(p,  'regularMarketPreviousClose')  ?? prevClose)
       marketCap     =    raw(p,  'marketCap') ?? marketCap
@@ -440,11 +443,56 @@ export async function GET(req: NextRequest) {
     if (high52w == null) high52w = raw(meta, 'fiftyTwoWeekHigh') ?? r2(Math.max(...allCloses.slice(-252)))
     if (low52w  == null) low52w  = raw(meta, 'fiftyTwoWeekLow')  ?? r2(Math.min(...allCloses.slice(-252)))
 
-    // ── News ──────────────────────────────────────────────────────────────────
+    // ── News (ranked for ticker relevance) ─────────────────────────────────────
     const news: StockResult['news'] = []
     try {
-      const searchData = await yfGet(`${YF1}/v1/finance/search?q=${encodeURIComponent(ticker)}&newsCount=10&enableFuzzyQuery=false&quotesCount=0`)
-      for (const item of (searchData?.news ?? []) as Record<string,unknown>[]) {
+      type RawNews = Record<string, unknown>
+      const base = `${YF1}/v1/finance/search?q=${encodeURIComponent(ticker)}&newsCount=20&quotesCount=0&enableFuzzyQuery=false`
+
+      // news_cie_vespa returns genuinely ticker-focused stories rather than generic
+      // market news that merely tags the ticker in relatedTickers. Fall back to the
+      // plain search if it yields nothing.
+      let rawNews: RawNews[] = []
+      try {
+        const vespa = await yfGet(`${base}&newsQueryId=news_cie_vespa`)
+        rawNews = (vespa?.news ?? []) as RawNews[]
+      } catch { /* fall through to plain search */ }
+      if (!rawNews.length) {
+        try {
+          const plain = await yfGet(base)
+          rawNews = (plain?.news ?? []) as RawNews[]
+        } catch { /* news optional */ }
+      }
+
+      // Company-name root for title matching, e.g. "NVIDIA Corporation" → "nvidia"
+      const nameRoot = (companyName ?? '')
+        .toLowerCase()
+        .replace(/[,.]/g, ' ')
+        .replace(/\b(corp|corporation|inc|incorporated|co|company|ltd|limited|plc|holdings?|group|the|class\s+[a-c])\b/g, ' ')
+        .trim()
+        .split(/\s+/)[0] ?? ''
+      const tk = ticker.toLowerCase()
+
+      const score = (item: RawNews): number => {
+        const title = ((item.title as string) ?? '').toLowerCase()
+        const rel = (item.relatedTickers as string[]) ?? []
+        let s = 0
+        if (nameRoot.length >= 3 && title.includes(nameRoot)) s += 5
+        if (title.includes(tk)) s += 4
+        if (rel[0] === ticker) s += 3
+        else if (rel.includes(ticker)) s += 2
+        s -= Math.min(rel.length, 10) * 0.15  // fewer related tickers ⇒ more focused
+        return s
+      }
+
+      const ranked = rawNews
+        .map(item => ({ item, s: score(item) }))
+        .sort((a, b) => b.s !== a.s
+          ? b.s - a.s
+          : ((b.item.providerPublishTime as number) ?? 0) - ((a.item.providerPublishTime as number) ?? 0))
+        .slice(0, 12)
+
+      for (const { item } of ranked) {
         const title = (item.title as string) ?? ''
         const thumbResolutions = (item.thumbnail as {resolutions?: {url: string; width: number}[]} | undefined)?.resolutions ?? []
         const imageUrl = thumbResolutions.find(r => r.width >= 140)?.url ?? thumbResolutions[0]?.url ?? null
