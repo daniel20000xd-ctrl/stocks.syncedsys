@@ -58,6 +58,7 @@ interface StockData {
   debtToEquity: Num; currentRatio: Num; quickRatio: Num
   totalCash: Num; totalDebt: Num; freeCashflow: Num; operatingCashflow: Num
   totalRevenue: Num; grossProfits: Num; ebitda: Num
+  companyName: string | null
   description: string | null; sector: string | null; industry: string | null
   employees: Num; website: string | null; country: string | null
   nextEarningsDate: string | null
@@ -181,7 +182,7 @@ function buildViewerContext(d: StockData): string {
   const lines: string[] = []
   const h = (t: string) => { lines.push(''); lines.push(t); lines.push('─'.repeat(t.length)) }
 
-  lines.push(`=== STOCK VIEWER: ${d.ticker} (${d.interval}) ===`)
+  lines.push(`=== STOCK VIEWER: ${d.companyName ? `${d.companyName} (${d.ticker})` : d.ticker} (${d.interval}) ===`)
   lines.push(`Updated: ${new Date().toUTCString()}`)
 
   h('CURRENT PRICE')
@@ -495,6 +496,8 @@ export default function StockViewer({ initialTicker, initialInterval, onDataUpda
   const [showDropdown, setShowDropdown] = useState(false)
   const [candleRes, setCandleRes] = useState<CandleRes>('1D')
   const [showAdvanced, setShowAdvanced] = useState(false)
+  const [newsUpdatedAt, setNewsUpdatedAt] = useState<number | null>(null)
+  const [newsLive, setNewsLive] = useState(false)
 
   const chartContainerRef = useRef<HTMLDivElement>(null)
   const chartInstanceRef  = useRef<IChartApi | null>(null)
@@ -541,6 +544,7 @@ export default function StockViewer({ initialTicker, initialInterval, onDataUpda
         }
       } else {
         setStockData(json)
+        setNewsUpdatedAt(null)
         onDataUpdateRef.current?.(buildViewerContext(json))
       }
     } catch (e) {
@@ -563,6 +567,58 @@ export default function StockViewer({ initialTicker, initialInterval, onDataUpda
       fetchStock(pick, interval)
     }
   }, [])
+
+  // ── Live news refresh ────────────────────────────────────────────────────────
+  // Poll fresh news ONLY while the tab is visible and the user has been active.
+  // If they switch tabs or walk away, polling pauses — no point updating when
+  // no one is watching. Resumes immediately when the tab is shown again.
+  const companyName = stockData?.companyName ?? null
+  useEffect(() => {
+    if (!activeTicker) return
+
+    const POLL_MS = 90_000
+    const IDLE_MS = 30 * 60_000           // pause after 30 min with no interaction
+    let lastActive = Date.now()
+    let aborted = false
+    const markActive = () => { lastActive = Date.now() }
+    const activityEvents = ['mousemove', 'keydown', 'scroll', 'touchstart', 'pointerdown']
+    activityEvents.forEach(e => window.addEventListener(e, markActive, { passive: true }))
+
+    const refresh = async () => {
+      if (document.visibilityState !== 'visible' || Date.now() - lastActive > IDLE_MS) {
+        setNewsLive(false)
+        return
+      }
+      setNewsLive(true)
+      try {
+        const url = `/api/news?ticker=${encodeURIComponent(activeTicker)}${companyName ? `&name=${encodeURIComponent(companyName)}` : ''}`
+        const res = await fetch(url)
+        if (!res.ok || aborted) return
+        const data = await res.json()
+        if (Array.isArray(data.news) && data.news.length) {
+          setStockData(prev => prev && prev.ticker === activeTicker ? { ...prev, news: data.news } : prev)
+          setNewsUpdatedAt(Date.now())
+        }
+      } catch { /* transient — try again next tick */ }
+    }
+
+    const kick = setTimeout(refresh, 8000)
+    const id   = setInterval(refresh, POLL_MS)
+    const onVisChange = () => {
+      if (document.visibilityState === 'visible') { markActive(); refresh() }
+      else setNewsLive(false)
+    }
+    document.addEventListener('visibilitychange', onVisChange)
+
+    return () => {
+      aborted = true
+      clearTimeout(kick)
+      clearInterval(id)
+      document.removeEventListener('visibilitychange', onVisChange)
+      activityEvents.forEach(e => window.removeEventListener(e, markActive))
+      setNewsLive(false)
+    }
+  }, [activeTicker, companyName])
 
   function handleInputChange(e: React.ChangeEvent<HTMLInputElement>) {
     const v = e.target.value
@@ -1102,10 +1158,26 @@ export default function StockViewer({ initialTicker, initialInterval, onDataUpda
             {/* News feed */}
             {news.length > 0 && (
               <div className="bg-white rounded-xl p-5 shadow-sm">
-                <h2 className="font-semibold text-gray-800 mb-4 flex items-center gap-2 text-sm">
-                  <Newspaper size={14} className="text-amber-500" />
-                  Latest News
-                </h2>
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="font-semibold text-gray-800 flex items-center gap-2 text-sm">
+                    <Newspaper size={14} className="text-amber-500" />
+                    Latest News
+                  </h2>
+                  <div className="flex items-center gap-2 text-[11px] text-gray-400">
+                    {newsUpdatedAt && (
+                      <span>Updated {new Date(newsUpdatedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</span>
+                    )}
+                    {newsLive && (
+                      <span className="flex items-center gap-1.5 text-green-600 font-medium">
+                        <span className="relative flex h-2 w-2">
+                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
+                          <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500" />
+                        </span>
+                        Live
+                      </span>
+                    )}
+                  </div>
+                </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   {news.map((item, i) => (
                     <a
