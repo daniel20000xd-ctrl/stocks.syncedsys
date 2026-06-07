@@ -340,6 +340,55 @@ function buildViewerContext(d: StockData): string {
   return lines.join('\n')
 }
 
+// ── Company name → ticker aliases ────────────────────────────────────────────
+
+const TICKER_ALIASES: Record<string, string> = {
+  apple: 'AAPL', google: 'GOOGL', alphabet: 'GOOGL', nvidia: 'NVDA',
+  microsoft: 'MSFT', amazon: 'AMZN', meta: 'META', facebook: 'META',
+  tesla: 'TSLA', netflix: 'NFLX', disney: 'DIS', walmart: 'WMT',
+  visa: 'V', mastercard: 'MA', paypal: 'PYPL', salesforce: 'CRM',
+  adobe: 'ADBE', oracle: 'ORCL', intel: 'INTC', broadcom: 'AVGO',
+  boeing: 'BA', ibm: 'IBM', ford: 'F', uber: 'UBER', airbnb: 'ABNB',
+  spotify: 'SPOT', coinbase: 'COIN', snowflake: 'SNOW', shopify: 'SHOP',
+  zoom: 'ZM', snap: 'SNAP', snapchat: 'SNAP', pinterest: 'PINS',
+  reddit: 'RDDT', coke: 'KO', 'coca-cola': 'KO', cocacola: 'KO',
+  pepsi: 'PEP', pepsico: 'PEP', exxon: 'XOM', chevron: 'CVX',
+  palantir: 'PLTR', robinhood: 'HOOD', lyft: 'LYFT', amd: 'AMD',
+  qualcomm: 'QCOM', starbucks: 'SBUX', mcdonalds: 'MCD', target: 'TGT',
+  costco: 'COST', verizon: 'VZ', comcast: 'CMCSA', ups: 'UPS',
+  fedex: 'FDX', citigroup: 'C', citi: 'C', 'goldman sachs': 'GS',
+  'morgan stanley': 'MS', 'wells fargo': 'WFC', 'bank of america': 'BAC',
+  jpmorgan: 'JPM', 'jp morgan': 'JPM', berkshire: 'BRK-B',
+  'johnson & johnson': 'JNJ', 'procter & gamble': 'PG',
+  lockheed: 'LMT', raytheon: 'RTX', 'general electric': 'GE',
+  'general motors': 'GM', 'home depot': 'HD', 'at&t': 'T',
+  'texas instruments': 'TXN',
+}
+
+const RELATED_STOCKS: Record<string, string[]> = {
+  AAPL:  ['MSFT', 'GOOGL', 'META', 'AMZN', 'NVDA'],
+  NVDA:  ['AMD', 'INTC', 'QCOM', 'AVGO', 'TSM'],
+  GOOG:  ['META', 'MSFT', 'AAPL', 'AMZN', 'NFLX'],
+  GOOGL: ['META', 'MSFT', 'AAPL', 'AMZN', 'NFLX'],
+  MSFT:  ['AAPL', 'GOOGL', 'META', 'AMZN', 'NVDA'],
+  AMZN:  ['MSFT', 'AAPL', 'GOOGL', 'META', 'SHOP'],
+  META:  ['GOOGL', 'AAPL', 'MSFT', 'SNAP', 'PINS'],
+  TSLA:  ['F', 'GM', 'RIVN', 'NIO', 'LCID'],
+  NFLX:  ['DIS', 'WBD', 'PARA', 'SPOT', 'ROKU'],
+  AMD:   ['NVDA', 'INTC', 'QCOM', 'AVGO', 'ARM'],
+  INTC:  ['AMD', 'NVDA', 'QCOM', 'AVGO', 'TSM'],
+  JPM:   ['BAC', 'WFC', 'GS', 'MS', 'C'],
+  BAC:   ['JPM', 'WFC', 'GS', 'MS', 'C'],
+  V:     ['MA', 'PYPL', 'AXP', 'SQ', 'FI'],
+  MA:    ['V', 'PYPL', 'AXP', 'SQ', 'FI'],
+  WMT:   ['COST', 'TGT', 'AMZN', 'HD', 'KR'],
+  XOM:   ['CVX', 'COP', 'BP', 'SHEL', 'TTE'],
+  JNJ:   ['PFE', 'ABBV', 'MRK', 'BMY', 'LLY'],
+  PLTR:  ['AI', 'BBAI', 'SNOW', 'PATH', 'S'],
+  COIN:  ['MSTR', 'MARA', 'RIOT', 'HOOD', 'CLSK'],
+  SHOP:  ['AMZN', 'ETSY', 'WIX', 'BIGC', 'WDAY'],
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 
 interface StockViewerProps {
@@ -356,15 +405,29 @@ export default function StockViewer({ initialTicker, initialInterval, onDataUpda
   const [stockData, setStockData] = useState<StockData | null>(null)
   const [loading, setLoading]     = useState(false)
   const [error, setError]         = useState<string | null>(null)
+  const [suggestions, setSuggestions] = useState<Array<{symbol: string; name: string; exchange: string}>>([])
+  const [showDropdown, setShowDropdown] = useState(false)
 
   const chartContainerRef = useRef<HTMLDivElement>(null)
   const chartInstanceRef  = useRef<IChartApi | null>(null)
   const onDataUpdateRef   = useRef(onDataUpdate)
   const onConfigUpdateRef = useRef(onConfigUpdate)
+  const suggestTimerRef   = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const searchWrapperRef  = useRef<HTMLDivElement>(null)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { onDataUpdateRef.current = onDataUpdate }, [onDataUpdate])
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => { onConfigUpdateRef.current = onConfigUpdate }, [onConfigUpdate])
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (searchWrapperRef.current && !searchWrapperRef.current.contains(e.target as Node)) {
+        setShowDropdown(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
 
   // ── Fetch ──────────────────────────────────────────────────────────────────
 
@@ -372,12 +435,22 @@ export default function StockViewer({ initialTicker, initialInterval, onDataUpda
     if (!ticker) return
     setLoading(true)
     setError(null)
+    setSuggestions([])
     try {
       const res  = await fetch(`/api/stocks?ticker=${encodeURIComponent(ticker)}&interval=${intv}`)
       const json = await res.json() as StockData & { error?: string }
       if (!res.ok) {
         setError(json.error ?? 'Failed to fetch stock data')
         setStockData(null)
+        if (res.status === 404) {
+          try {
+            const sRes = await fetch(`/api/search?q=${encodeURIComponent(ticker)}`)
+            if (sRes.ok) {
+              const sData = await sRes.json()
+              setSuggestions(sData.quotes ?? [])
+            }
+          } catch { /* suggestions optional */ }
+        }
       } else {
         setStockData(json)
         onDataUpdateRef.current?.(buildViewerContext(json))
@@ -392,13 +465,66 @@ export default function StockViewer({ initialTicker, initialInterval, onDataUpda
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
-    if (initialTicker) fetchStock(initialTicker.toUpperCase(), (initialInterval as Interval) ?? '1Y')
+    if (initialTicker) {
+      fetchStock(initialTicker.toUpperCase(), (initialInterval as Interval) ?? '1Y')
+    } else {
+      const picks = ['AAPL', 'NVDA', 'GOOG']
+      const pick = picks[Math.floor(Math.random() * picks.length)]
+      setTickerInput(pick)
+      setActiveTicker(pick)
+      fetchStock(pick, interval)
+    }
   }, [])
 
-  function handleSearch(e?: React.FormEvent) {
+  function handleInputChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const v = e.target.value
+    setTickerInput(v)
+    if (suggestTimerRef.current) clearTimeout(suggestTimerRef.current)
+    if (!v.trim()) { setSuggestions([]); setShowDropdown(false); return }
+    suggestTimerRef.current = setTimeout(async () => {
+      try {
+        const res = await fetch(`/api/search?q=${encodeURIComponent(v)}`)
+        if (res.ok) {
+          const data = await res.json()
+          const quotes = data.quotes ?? []
+          setSuggestions(quotes)
+          setShowDropdown(quotes.length > 0)
+        }
+      } catch { /* suggestions optional */ }
+    }, 300)
+  }
+
+  async function resolveTicker(input: string): Promise<string> {
+    const trimmed = input.trim()
+    const lower = trimmed.toLowerCase()
+    if (TICKER_ALIASES[lower]) return TICKER_ALIASES[lower]
+    if (/^[a-zA-Z0-9]{1,6}(-[a-zA-Z0-9]{1,2})?(\.[a-zA-Z]{2})?$/.test(trimmed)) return trimmed.toUpperCase()
+    try {
+      const res = await fetch(`/api/search?q=${encodeURIComponent(trimmed)}`)
+      if (res.ok) {
+        const data = await res.json()
+        if (data.quotes?.length) return data.quotes[0].symbol as string
+      }
+    } catch { /* fall through */ }
+    return trimmed.toUpperCase()
+  }
+
+  function handleSuggestionClick(symbol: string) {
+    setTickerInput(symbol)
+    setActiveTicker(symbol)
+    setShowDropdown(false)
+    setSuggestions([])
+    fetchStock(symbol, interval)
+    onConfigUpdateRef.current?.(symbol, interval)
+  }
+
+  async function handleSearch(e?: React.FormEvent) {
     e?.preventDefault()
-    const t = tickerInput.trim().toUpperCase()
-    if (!t) return
+    const raw = tickerInput.trim()
+    if (!raw) return
+    setShowDropdown(false)
+    const t = await resolveTicker(raw)
+    setTickerInput(t)
     setActiveTicker(t)
     fetchStock(t, interval)
     onConfigUpdateRef.current?.(t, interval)
@@ -529,15 +655,33 @@ export default function StockViewer({ initialTicker, initialInterval, onDataUpda
         </div>
 
         {/* Search bar */}
+        <div ref={searchWrapperRef}>
         <form onSubmit={handleSearch} className="bg-white rounded-xl p-4 shadow-sm flex gap-3 items-center">
           <div className="relative flex-1">
             <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
             <input
               value={tickerInput}
-              onChange={(e) => setTickerInput(e.target.value.toUpperCase())}
-              placeholder="Ticker — e.g. AAPL, TSLA, MSFT, ERIC-B.ST, VOLV-B.ST"
-              className="w-full pl-9 pr-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:border-blue-400 font-mono placeholder:font-sans"
+              onChange={handleInputChange}
+              onFocus={() => suggestions.length > 0 && setShowDropdown(true)}
+              placeholder="Search by ticker or company name — e.g. AAPL, apple, nvidia"
+              className="w-full pl-9 pr-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:border-blue-400 placeholder:font-sans"
             />
+            {showDropdown && suggestions.length > 0 && (
+              <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-gray-200 rounded-xl shadow-lg z-50 overflow-hidden">
+                {suggestions.map((s) => (
+                  <button
+                    key={s.symbol}
+                    type="button"
+                    onMouseDown={(e) => { e.preventDefault(); handleSuggestionClick(s.symbol) }}
+                    className="w-full flex items-center gap-3 px-4 py-2.5 text-left hover:bg-gray-50 transition-colors border-b border-gray-50 last:border-0"
+                  >
+                    <span className="font-mono font-bold text-sm text-gray-900 w-16 shrink-0">{s.symbol}</span>
+                    <span className="text-xs text-gray-500 truncate flex-1">{s.name}</span>
+                    {s.exchange && <span className="text-[10px] text-gray-300 font-mono shrink-0">{s.exchange}</span>}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
           <button
             type="submit"
@@ -550,11 +694,29 @@ export default function StockViewer({ initialTicker, initialInterval, onDataUpda
             }
           </button>
         </form>
+        </div>
 
         {/* Error */}
         {error && (
           <div className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-sm text-red-700">
-            {error}
+            <p>{error}</p>
+            {suggestions.length > 0 && (
+              <div className="mt-3">
+                <p className="text-xs text-red-600 mb-2 font-medium">Did you mean one of these?</p>
+                <div className="flex flex-wrap gap-2">
+                  {suggestions.map((s) => (
+                    <button
+                      key={s.symbol}
+                      onClick={() => handleSuggestionClick(s.symbol)}
+                      className="flex items-center gap-2 px-3 py-1.5 bg-white rounded-lg border border-red-200 hover:border-blue-400 text-gray-800 text-xs transition-colors"
+                    >
+                      <span className="font-mono font-bold">{s.symbol}</span>
+                      <span className="text-gray-500 max-w-[100px] truncate">{s.name}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -589,6 +751,22 @@ export default function StockViewer({ initialTicker, initialInterval, onDataUpda
                 <Stat label="Div Yield"    value={stockData.dividendYield!= null ? `${stockData.dividendYield}%`        : '—'} />
               </div>
             </div>
+
+            {/* Related stocks */}
+            {RELATED_STOCKS[stockData.ticker] && (
+              <div className="flex items-center gap-2 overflow-x-auto py-1">
+                <span className="text-xs text-gray-400 shrink-0 font-medium">Related:</span>
+                {RELATED_STOCKS[stockData.ticker].map(sym => (
+                  <button
+                    key={sym}
+                    onClick={() => { setTickerInput(sym); setActiveTicker(sym); fetchStock(sym, interval) }}
+                    className="shrink-0 px-3 py-1 bg-white rounded-full text-xs font-mono font-semibold text-gray-700 border border-gray-200 hover:border-blue-400 hover:text-blue-600 transition-colors shadow-sm"
+                  >
+                    {sym}
+                  </button>
+                ))}
+              </div>
+            )}
 
             {/* Candlestick chart */}
             <div className="bg-[#0f1117] rounded-xl overflow-hidden shadow-sm">
