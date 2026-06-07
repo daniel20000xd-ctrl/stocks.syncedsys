@@ -185,9 +185,11 @@ function buildViewerContext(d: StockData): string {
   lines.push(`Updated: ${new Date().toUTCString()}`)
 
   h('CURRENT PRICE')
-  lines.push(`  ${d.ticker}  $${d.currentPrice.toFixed(2)}  (${S(d.change)} / ${S(d.changePercent)}%)`)
+  lines.push(`  ${d.ticker}  $${d.currentPrice.toFixed(2)}  (${S(d.change)} / ${S(d.changePercent)}% — 1 day)`)
+  lines.push(`  Period change (${d.interval}): ${S(d.periodChangePercent)}%`)
   if (d.sector)  lines.push(`  Sector: ${d.sector}  |  Industry: ${d.industry ?? 'N/A'}`)
   if (d.country) lines.push(`  Country: ${d.country}${d.employees ? `  |  Employees: ${d.employees.toLocaleString()}` : ''}`)
+  if (d.website) lines.push(`  Website: ${d.website}`)
 
   if (d.description) {
     h('COMPANY OVERVIEW')
@@ -212,6 +214,10 @@ function buildViewerContext(d: StockData): string {
   lines.push(`  Forward EPS:             ${d.forwardEps != null ? `$${d.forwardEps}` : 'N/A'}`)
   lines.push(`  Dividend Yield:          ${P(d.dividendYield)}`)
   lines.push(`  Beta:                    ${N(d.beta, 2)}`)
+  lines.push(`  Short Ratio:             ${N(d.shortRatio, 2)}`)
+  lines.push(`  Payout Ratio:            ${P(d.payoutRatio)}`)
+  lines.push(`  Insider Ownership:       ${P(d.heldPercentInsiders)}`)
+  lines.push(`  Institutional Own.:      ${P(d.heldPercentInstitutions)}`)
   lines.push(`  52-Week High:            ${d.high52w != null ? `$${d.high52w.toFixed(2)}` : 'N/A'}`)
   lines.push(`  52-Week Low:             ${d.low52w  != null ? `$${d.low52w.toFixed(2)}`  : 'N/A'}`)
   if (d.nextEarningsDate) lines.push(`  Next Earnings Date:      ${d.nextEarningsDate}`)
@@ -242,8 +248,13 @@ function buildViewerContext(d: StockData): string {
   lines.push(`  EBITDA:                  ${B(d.ebitda)}`)
   lines.push(`  Total Cash:              ${B(d.totalCash)}`)
   lines.push(`  Total Debt:              ${B(d.totalDebt)}`)
+  lines.push(`  Operating Cash Flow:     ${B(d.operatingCashflow)}`)
   lines.push(`  Free Cash Flow:          ${B(d.freeCashflow)}`)
+  lines.push(`  Gross Profit:            ${B(d.grossProfits)}`)
   lines.push(`  Debt/Equity:             ${N(d.debtToEquity, 2)}`)
+  lines.push(`  Current Ratio:           ${N(d.currentRatio, 2)}`)
+  lines.push(`  Quick Ratio:             ${N(d.quickRatio, 2)}`)
+  lines.push(`  Book Value/Share:        ${d.bookValue != null ? `$${d.bookValue}` : 'N/A'}`)
 
   h('TECHNICAL INDICATORS')
   const ind = d.indicators
@@ -263,12 +274,42 @@ function buildViewerContext(d: StockData): string {
   }
   if (d.sma50.length)  lines.push(`  SMA50 (latest):      $${d.sma50[d.sma50.length-1].value.toFixed(2)}`)
   if (d.sma200.length) lines.push(`  SMA200 (latest):     $${d.sma200[d.sma200.length-1].value.toFixed(2)}`)
+  if (ind.stochK != null) {
+    const lbl = ind.stochK > 80 ? 'OVERBOUGHT' : ind.stochK < 20 ? 'OVERSOLD' : 'neutral'
+    lines.push(`  Stochastic %K(14,3): ${ind.stochK}${ind.stochD != null ? `  %D: ${ind.stochD}` : ''}  [${lbl}]`)
+  }
+  if (ind.williamsR != null) {
+    const lbl = ind.williamsR > -20 ? 'OVERBOUGHT' : ind.williamsR < -80 ? 'OVERSOLD' : 'neutral'
+    lines.push(`  Williams %R(14):     ${ind.williamsR}  [${lbl}]`)
+  }
+  if (ind.cci != null) {
+    const lbl = ind.cci > 100 ? 'OVERBOUGHT' : ind.cci < -100 ? 'OVERSOLD' : 'neutral'
+    lines.push(`  CCI(20):             ${ind.cci}  [${lbl}]`)
+  }
+  if (ind.atr != null) lines.push(`  ATR(14):             $${ind.atr.toFixed(2)}  (avg true range)`)
+  if (ind.roc != null) lines.push(`  ROC(14):             ${S(ind.roc)}%`)
 
   if (d.recommendationTrend.length) {
     h('ANALYST RECOMMENDATION TREND')
     lines.push('  Period   StrongBuy  Buy  Hold  Sell  StrongSell')
     for (const r of d.recommendationTrend)
       lines.push(`  ${r.period.padEnd(8)} ${String(r.strongBuy).padStart(9)} ${String(r.buy).padStart(4)} ${String(r.hold).padStart(5)} ${String(r.sell).padStart(5)} ${String(r.strongSell).padStart(10)}`)
+  }
+
+  if (d.upgradeDowngradeHistory.length) {
+    h('RECENT ANALYST ACTIONS (upgrades / downgrades)')
+    for (const u of d.upgradeDowngradeHistory)
+      lines.push(`  ${(u.date || 'N/A').padEnd(12)} ${u.firm.padEnd(26)} ${u.action.padEnd(11)} ${u.fromGrade || '—'} → ${u.toGrade}`)
+  }
+
+  if (d.earningsTrend.length) {
+    h('FORWARD ESTIMATES')
+    lines.push('  Period   End Date     EPS Est.   Revenue Est.   # Analysts')
+    for (const t of d.earningsTrend) {
+      const eps = t.epsEst != null ? `$${t.epsEst.toFixed(2)}` : 'N/A'
+      const rev = t.revEst != null ? B(t.revEst) : 'N/A'
+      lines.push(`  ${(t.period || '').padEnd(8)} ${(t.endDate || '').padEnd(12)} ${eps.padStart(9)}  ${rev.padStart(13)}  ${(t.numAnalysts != null ? String(t.numAnalysts) : 'N/A').padStart(10)}`)
+    }
   }
 
   if (d.earningsHistory.length) {
@@ -284,23 +325,30 @@ function buildViewerContext(d: StockData): string {
 
   if (d.incomeAnnual.length) {
     h('ANNUAL INCOME STATEMENTS')
-    lines.push('  Fiscal Year   Revenue        Gross Profit    EBIT           Net Income')
+    lines.push('  Fiscal Year   Revenue        Gross Profit    EBIT           Net Income     EBITDA')
     for (const s of d.incomeAnnual)
-      lines.push(`  ${s.date.padEnd(13)} ${B(s.totalRevenue).padStart(14)} ${B(s.grossProfit).padStart(15)} ${B(s.ebit).padStart(14)} ${B(s.netIncome).padStart(14)}`)
+      lines.push(`  ${s.date.padEnd(13)} ${B(s.totalRevenue).padStart(14)} ${B(s.grossProfit).padStart(15)} ${B(s.ebit).padStart(14)} ${B(s.netIncome).padStart(14)} ${B(s.ebitda).padStart(14)}`)
+  }
+
+  if (d.incomeQuarterly.length) {
+    h('QUARTERLY INCOME STATEMENTS (recent)')
+    lines.push('  Quarter       Revenue        Gross Profit    Net Income')
+    for (const s of d.incomeQuarterly)
+      lines.push(`  ${s.date.padEnd(13)} ${B(s.totalRevenue).padStart(14)} ${B(s.grossProfit).padStart(15)} ${B(s.netIncome).padStart(14)}`)
   }
 
   if (d.balanceAnnual.length) {
     h('ANNUAL BALANCE SHEETS')
-    lines.push('  Fiscal Year   Total Assets   Total Liab     Equity         Cash')
+    lines.push('  Fiscal Year   Total Assets   Total Liab     Equity         Cash           Long-Term Debt')
     for (const s of d.balanceAnnual)
-      lines.push(`  ${s.date.padEnd(13)} ${B(s.totalAssets).padStart(14)} ${B(s.totalLiab).padStart(14)} ${B(s.equity).padStart(14)} ${B(s.cash).padStart(14)}`)
+      lines.push(`  ${s.date.padEnd(13)} ${B(s.totalAssets).padStart(14)} ${B(s.totalLiab).padStart(14)} ${B(s.equity).padStart(14)} ${B(s.cash).padStart(14)} ${B(s.longDebt).padStart(14)}`)
   }
 
   if (d.cashflowAnnual.length) {
     h('ANNUAL CASH FLOW STATEMENTS')
-    lines.push('  Fiscal Year   Operating CF   CapEx          Free CF')
+    lines.push('  Fiscal Year   Operating CF   CapEx          Free CF        Investing CF   Financing CF')
     for (const s of d.cashflowAnnual)
-      lines.push(`  ${s.date.padEnd(13)} ${B(s.operatingCF).padStart(14)} ${B(s.capex).padStart(14)} ${B(s.freeCF).padStart(14)}`)
+      lines.push(`  ${s.date.padEnd(13)} ${B(s.operatingCF).padStart(14)} ${B(s.capex).padStart(14)} ${B(s.freeCF).padStart(14)} ${B(s.investingCF).padStart(14)} ${B(s.financingCF).padStart(14)}`)
   }
 
   if (d.insiderTransactions.length) {
@@ -308,7 +356,8 @@ function buildViewerContext(d: StockData): string {
     for (const t of d.insiderTransactions) {
       const shares = t.shares != null ? `${t.shares.toLocaleString()} shares` : ''
       const val    = t.value  != null ? ` (${B(t.value)})` : ''
-      lines.push(`  ${t.date}  ${t.name.padEnd(30)} ${shares}${val}`)
+      const desc   = t.description ? ` — ${t.description}` : ''
+      lines.push(`  ${t.date}  ${t.name.padEnd(30)} ${shares}${val}${desc}`)
     }
   }
 
@@ -317,10 +366,14 @@ function buildViewerContext(d: StockData): string {
     h('NORDIC DATA — AVANZA (in SEK)')
     if (a.marketList) lines.push(`  Market List:             ${a.marketList}`)
     lines.push(`  P/E: ${N(a.peRatio, 2)}  P/S: ${N(a.psRatio, 2)}  P/B: ${N(a.pbRatio, 2)}  EV/EBIT: ${N(a.evEbit, 2)}`)
-    lines.push(`  Direct Yield: ${P(a.directYield)}  ROE: ${P(a.returnOnEquity)}  ROA: ${P(a.returnOnAssets)}`)
-    lines.push(`  Gross Margin: ${P(a.grossMargin)}  Operating: ${P(a.operatingMargin)}  Net: ${P(a.netMargin)}`)
-    lines.push(`  Market Cap: ${a.marketCap != null ? `${(a.marketCap/1e9).toFixed(2)}B SEK` : 'N/A'}  EPS: ${a.eps != null ? `${a.eps} SEK` : 'N/A'}`)
+    lines.push(`  Direct Yield: ${P(a.directYield)}  ROE: ${P(a.returnOnEquity)}  ROA: ${P(a.returnOnAssets)}  ROCE: ${P(a.returnOnCapitalEmployed)}`)
+    lines.push(`  Gross Margin: ${P(a.grossMargin)}  Operating: ${P(a.operatingMargin)}  Net: ${P(a.netMargin)}  Equity Ratio: ${P(a.equityRatio)}`)
+    lines.push(`  Beta: ${N(a.beta, 2)}  Volatility: ${P(a.volatility)}  Short Selling Ratio: ${P(a.shortSellingRatio)}`)
+    lines.push(`  Market Cap: ${a.marketCap != null ? `${(a.marketCap/1e9).toFixed(2)}B SEK` : 'N/A'}  EPS: ${a.eps != null ? `${a.eps} SEK` : 'N/A'}  Equity/Share: ${a.equityPerShare != null ? `${a.equityPerShare} SEK` : 'N/A'}`)
+    if (a.numberOfOwners != null) lines.push(`  Owners (Avanza): ${a.numberOfOwners.toLocaleString()}`)
+    if (a.dividendAmount != null) lines.push(`  Dividend: ${a.dividendAmount} SEK${a.dividendsPerYear ? ` ×${a.dividendsPerYear}/yr` : ''}${a.dividendExDate ? ` (ex-date ${a.dividendExDate})` : ''}`)
     if (a.nextReportDate) lines.push(`  Next Report: ${a.nextReportDate}${a.nextReportType ? ` (${a.nextReportType})` : ''}`)
+    if (a.previousReportDate) lines.push(`  Previous Report: ${a.previousReportDate}`)
   }
 
   h(`PRICE HISTORY — ${d.ohlcv.length} bars (${d.ohlcv[0]?.time ?? ''} → ${d.ohlcv[d.ohlcv.length-1]?.time ?? ''})`)
@@ -686,9 +739,30 @@ export default function StockViewer({ initialTicker, initialInterval, onDataUpda
       <div className="max-w-5xl mx-auto space-y-4">
 
         {/* Page heading */}
-        <div className="flex items-center gap-2 mb-1">
-          <BarChart2 size={20} className="text-green-600" />
-          <h1 className="text-xl font-bold text-gray-800">Stock Viewer</h1>
+        <div className="flex items-center justify-between gap-2 mb-1">
+          <div className="flex items-center gap-2">
+            <BarChart2 size={20} className="text-green-600" />
+            <h1 className="text-xl font-bold text-gray-800">Stock Viewer</h1>
+          </div>
+          {stockData && (
+            <div className="flex items-center gap-2">
+              <span className="hidden sm:inline text-[11px] text-gray-400">{showAdvanced ? 'Full financials' : 'Key metrics'}</span>
+              <div className="flex items-center bg-gray-200 rounded-lg p-0.5 text-xs font-semibold">
+                <button
+                  onClick={() => setShowAdvanced(false)}
+                  className={`px-3 py-1 rounded-md transition-colors ${!showAdvanced ? 'bg-white text-gray-800 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                >
+                  Standard
+                </button>
+                <button
+                  onClick={() => setShowAdvanced(true)}
+                  className={`px-3 py-1 rounded-md transition-colors ${showAdvanced ? 'bg-white text-gray-800 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}
+                >
+                  Advanced
+                </button>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Search bar */}
@@ -877,12 +951,14 @@ export default function StockViewer({ initialTicker, initialInterval, onDataUpda
                     Technical Indicators
                     <span className="text-[10px] text-gray-400 font-normal">· Daily close, latest bar</span>
                   </h2>
-                  <button
-                    onClick={() => setShowAdvanced(v => !v)}
-                    className="text-[11px] px-3 py-1 rounded-full border border-gray-200 text-gray-500 hover:border-blue-400 hover:text-blue-600 transition-colors"
-                  >
-                    {showAdvanced ? 'Basic' : 'Advanced'}
-                  </button>
+                  {!showAdvanced && (
+                    <button
+                      onClick={() => setShowAdvanced(true)}
+                      className="text-[11px] px-3 py-1 rounded-full border border-gray-200 text-gray-500 hover:border-blue-400 hover:text-blue-600 transition-colors"
+                    >
+                      + More indicators
+                    </button>
+                  )}
                 </div>
                 <div className="flex flex-wrap gap-3">
 
@@ -998,7 +1074,8 @@ export default function StockViewer({ initialTicker, initialInterval, onDataUpda
               </div>
             )}
 
-            {/* Fundamentals */}
+            {/* Fundamentals (advanced — mirrors the header stats with full labels) */}
+            {showAdvanced && (
             <div className="bg-white rounded-xl p-5 shadow-sm">
               <h2 className="font-semibold text-gray-800 mb-3 flex items-center gap-2 text-sm">
                 <BookOpen size={14} className="text-purple-500" />
@@ -1020,6 +1097,7 @@ export default function StockViewer({ initialTicker, initialInterval, onDataUpda
                 ))}
               </div>
             </div>
+            )}
 
             {/* News feed */}
             {news.length > 0 && (
@@ -1088,7 +1166,7 @@ export default function StockViewer({ initialTicker, initialInterval, onDataUpda
             )}
 
             {/* ── Nordic data (Avanza) ─────────────────────────────────── */}
-            {stockData.avanza && (
+            {showAdvanced && stockData.avanza && (
               <SectionCard title="Nordic Data — Avanza (SEK)" icon={<BarChart2 size={14} className="text-yellow-500" />}>
                 <p className="text-[11px] text-gray-400 mb-3">
                   Swedish broker data{stockData.avanza.marketList ? ` · ${stockData.avanza.marketList}` : ''} — fills gaps Yahoo Finance leaves for Swedish tickers.
@@ -1119,7 +1197,8 @@ export default function StockViewer({ initialTicker, initialInterval, onDataUpda
               </SectionCard>
             )}
 
-            {/* ── Extended valuation ───────────────────────────────────── */}
+            {/* ── Extended valuation + Margins (advanced) ──────────────── */}
+            {showAdvanced && (<>
             <SectionCard title="Extended Valuation" icon={<BookOpen size={14} className="text-purple-500" />}>
               <Grid items={[
                 { label: 'Forward P/E',   value: stockData.forwardEps && stockData.currentPrice ? `${(stockData.currentPrice / stockData.forwardEps).toFixed(1)}×` : '—' },
@@ -1164,6 +1243,7 @@ export default function StockViewer({ initialTicker, initialInterval, onDataUpda
                 </div>
               </div>
             </SectionCard>
+            </>)}
 
             {/* ── Analyst price targets ────────────────────────────────── */}
             {stockData.targetMeanPrice != null && (
@@ -1234,8 +1314,19 @@ export default function StockViewer({ initialTicker, initialInterval, onDataUpda
               </div>
             )}
 
+            {/* Standard-mode CTA into the full financial breakdown */}
+            {!showAdvanced && (
+              <button
+                onClick={() => setShowAdvanced(true)}
+                className="w-full bg-white rounded-xl p-4 shadow-sm border border-dashed border-gray-200 text-sm text-gray-500 hover:text-blue-600 hover:border-blue-300 transition-colors flex items-center justify-center gap-2"
+              >
+                <BookOpen size={15} />
+                Show full financials — valuation, margins, statements, earnings & insider activity
+              </button>
+            )}
+
             {/* ── Analyst consensus ────────────────────────────────────── */}
-            {(stockData.targetMeanPrice || stockData.recommendationKey) && (
+            {showAdvanced && (stockData.targetMeanPrice || stockData.recommendationKey) && (
               <SectionCard title="Analyst Details" icon={<TrendingUp size={14} className="text-green-500" />}>
                 <div className="flex flex-wrap gap-3 mb-3">
                   {stockData.recommendationKey && (
@@ -1281,7 +1372,7 @@ export default function StockViewer({ initialTicker, initialInterval, onDataUpda
             )}
 
             {/* ── Earnings history & estimates ────────────────────────── */}
-            {(stockData.earningsHistory.length > 0 || stockData.earningsTrend.length > 0) && (
+            {showAdvanced && (stockData.earningsHistory.length > 0 || stockData.earningsTrend.length > 0) && (
               <SectionCard title="Earnings" icon={<BarChart2 size={14} className="text-orange-500" />}>
                 {stockData.earningsHistory.length > 0 && (
                   <div className="mb-4">
@@ -1315,7 +1406,7 @@ export default function StockViewer({ initialTicker, initialInterval, onDataUpda
             )}
 
             {/* ── Annual income statements ─────────────────────────────── */}
-            {stockData.incomeAnnual.length > 0 && (
+            {showAdvanced && stockData.incomeAnnual.length > 0 && (
               <SectionCard title="Annual Income Statements" icon={<BookOpen size={14} className="text-teal-500" />}>
                 <TableSection
                   cols={['Fiscal Year', 'Revenue', 'Gross Profit', 'EBIT', 'Net Income', 'EBITDA']}
@@ -1334,7 +1425,7 @@ export default function StockViewer({ initialTicker, initialInterval, onDataUpda
             )}
 
             {/* ── Balance sheet ─────────────────────────────────────────── */}
-            {stockData.balanceAnnual.length > 0 && (
+            {showAdvanced && stockData.balanceAnnual.length > 0 && (
               <SectionCard title="Annual Balance Sheets" icon={<BookOpen size={14} className="text-violet-500" />}>
                 <TableSection
                   cols={['Fiscal Year', 'Total Assets', 'Total Liab.', 'Equity', 'Cash', 'Long-Term Debt']}
@@ -1344,7 +1435,7 @@ export default function StockViewer({ initialTicker, initialInterval, onDataUpda
             )}
 
             {/* ── Cash flow ────────────────────────────────────────────── */}
-            {stockData.cashflowAnnual.length > 0 && (
+            {showAdvanced && stockData.cashflowAnnual.length > 0 && (
               <SectionCard title="Annual Cash Flow Statements" icon={<BarChart2 size={14} className="text-cyan-500" />}>
                 <TableSection
                   cols={['Fiscal Year', 'Operating CF', 'CapEx', 'Free CF', 'Investing CF', 'Financing CF']}
@@ -1354,7 +1445,7 @@ export default function StockViewer({ initialTicker, initialInterval, onDataUpda
             )}
 
             {/* ── Insider transactions ──────────────────────────────────── */}
-            {stockData.insiderTransactions.length > 0 && (
+            {showAdvanced && stockData.insiderTransactions.length > 0 && (
               <SectionCard title="Recent Insider Transactions" icon={<Newspaper size={14} className="text-rose-500" />}>
                 <TableSection
                   cols={['Date', 'Insider', 'Shares', 'Value', 'Description']}
