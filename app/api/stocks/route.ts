@@ -71,14 +71,59 @@ interface StockResult {
 const YF1 = 'https://query1.finance.yahoo.com'
 const YF2 = 'https://query2.finance.yahoo.com'
 
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+
 const YF_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'User-Agent': UA,
   'Accept': 'application/json',
 }
 
+// ── Yahoo auth (cookie + crumb) ───────────────────────────────────────────────
+// Yahoo's v7 quote and v10 quoteSummary endpoints require a session cookie and a
+// matching "crumb" token; without them they return 401/429 and all fundamentals
+// come back empty. The chart (v8) endpoint needs neither. We fetch the pair once
+// and cache it module-side for an hour.
+let cachedAuth: { cookie: string; crumb: string } | null = null
+let cachedAuthAt = 0
+
+async function getYahooAuth(): Promise<{ cookie: string; crumb: string } | null> {
+  if (cachedAuth && Date.now() - cachedAuthAt < 60 * 60 * 1000) return cachedAuth
+  try {
+    // Step 1 — hit a Yahoo origin to receive a session cookie
+    const cookieRes = await fetch('https://fc.yahoo.com/', {
+      headers: { 'User-Agent': UA, 'Accept': 'text/html,application/xhtml+xml' },
+      redirect: 'manual',
+    })
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const setCookies: string[] = (cookieRes.headers as any).getSetCookie?.()
+      ?? (cookieRes.headers.get('set-cookie') ? [cookieRes.headers.get('set-cookie') as string] : [])
+    const cookie = setCookies.map(c => c.split(';')[0]).filter(Boolean).join('; ')
+    if (!cookie) return null
+
+    // Step 2 — exchange the cookie for a crumb token
+    const crumbRes = await fetch('https://query2.finance.yahoo.com/v1/test/getcrumb', {
+      headers: { 'User-Agent': UA, 'Accept': '*/*', 'Cookie': cookie },
+    })
+    const crumb = (await crumbRes.text()).trim()
+    if (!crumb || crumb.includes('<') || crumb.length > 40) return null
+
+    cachedAuth = { cookie, crumb }
+    cachedAuthAt = Date.now()
+    return cachedAuth
+  } catch {
+    return null
+  }
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function yfGet(url: string): Promise<any> {
-  const res = await fetch(url, { headers: YF_HEADERS, cache: 'no-store' })
+async function yfGet(url: string, auth?: { cookie: string; crumb: string } | null): Promise<any> {
+  const headers: Record<string, string> = { ...YF_HEADERS }
+  let finalUrl = url
+  if (auth) {
+    headers.Cookie = auth.cookie
+    finalUrl += (url.includes('?') ? '&' : '?') + `crumb=${encodeURIComponent(auth.crumb)}`
+  }
+  const res = await fetch(finalUrl, { headers, cache: 'no-store' })
   if (!res.ok) throw new Error(`Yahoo Finance ${res.status}: ${url}`)
   return res.json()
 }
@@ -150,7 +195,10 @@ export async function GET(req: NextRequest) {
       .eq('ticker', ticker).eq('interval', interval).maybeSingle()
     if (cached?.fetched_at) {
       const age = Date.now() - new Date(cached.fetched_at as string).getTime()
-      if (age < 6 * 60 * 60 * 1000) return NextResponse.json(cached.data)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const d = cached.data as any
+      const complete = d && (d.marketCap != null || d.peRatio != null || d.eps != null) && 'periodChange' in d
+      if (age < 6 * 60 * 60 * 1000 && complete) return NextResponse.json(cached.data)
     }
   } catch { /* table not yet created */ }
 
@@ -238,11 +286,13 @@ export async function GET(req: NextRequest) {
     const upgradeDowngradeHistory: UpgradeRow[] = []
     const insiderTransactions:     InsiderRow[]  = []
 
-    // Run v7 quote + both quoteSummary batches in parallel; all failures are soft
+    // Authenticate once (cookie + crumb) so v7/v10 are not rejected, then run the
+    // v7 quote + both quoteSummary batches in parallel; all failures are soft.
+    const auth = await getYahooAuth()
     const [q0, s1, s2] = await Promise.allSettled([
-      yfGet(`${YF1}/v7/finance/quote?symbols=${encodeURIComponent(ticker)}`),
-      yfGet(`${YF2}/v10/finance/quoteSummary/${encodeURIComponent(ticker)}?modules=price,summaryDetail,defaultKeyStatistics,financialData,assetProfile,calendarEvents,majorHoldersBreakdown`),
-      yfGet(`${YF2}/v10/finance/quoteSummary/${encodeURIComponent(ticker)}?modules=incomeStatementHistory,incomeStatementHistoryQuarterly,balanceSheetHistory,cashflowStatementHistory,earningsHistory,earningsTrend,recommendationTrend,upgradeDowngradeHistory,insiderTransactions`),
+      yfGet(`${YF1}/v7/finance/quote?symbols=${encodeURIComponent(ticker)}`, auth),
+      yfGet(`${YF2}/v10/finance/quoteSummary/${encodeURIComponent(ticker)}?modules=price,summaryDetail,defaultKeyStatistics,financialData,assetProfile,calendarEvents,majorHoldersBreakdown`, auth),
+      yfGet(`${YF2}/v10/finance/quoteSummary/${encodeURIComponent(ticker)}?modules=incomeStatementHistory,incomeStatementHistoryQuarterly,balanceSheetHistory,cashflowStatementHistory,earningsHistory,earningsTrend,recommendationTrend,upgradeDowngradeHistory,insiderTransactions`, auth),
     ])
 
     // ── Parse v7 quote (reliable baseline — fills in when v10 is blocked) ──────
@@ -276,24 +326,24 @@ export async function GET(req: NextRequest) {
 
       currentPrice  = r2(raw(p,  'regularMarketPrice')         ?? currentPrice)
       prevClose     = r2(raw(p,  'regularMarketPreviousClose')  ?? prevClose)
-      marketCap     =    raw(p,  'marketCap')
-      peRatio       = raw(sd, 'trailingPE')    != null ? Math.round(raw(sd,'trailingPE')!    * 10) / 10 : null
-      dividendYield = raw(sd, 'dividendYield') != null ? raw(sd,'dividendYield')                        : null
+      marketCap     =    raw(p,  'marketCap') ?? marketCap
+      peRatio       = raw(sd, 'trailingPE')    != null ? Math.round(raw(sd,'trailingPE')!    * 10) / 10 : peRatio
+      dividendYield = raw(sd, 'dividendYield') != null ? raw(sd,'dividendYield')                        : dividendYield
       const h = raw(sd,'fiftyTwoWeekHigh') ?? raw(p,'fiftyTwoWeekHigh'); if (h) high52w = r2(h)
       const l = raw(sd,'fiftyTwoWeekLow')  ?? raw(p,'fiftyTwoWeekLow');  if (l) low52w  = r2(l)
       if (!high52w) high52w = r2(Math.max(...allCloses.slice(-252)))
       if (!low52w)  low52w  = r2(Math.min(...allCloses.slice(-252)))
 
-      eps                  = raw(ks, 'trailingEps')        != null ? r2(raw(ks,'trailingEps')!)                   : null
-      forwardEps           = raw(ks, 'forwardEps')         != null ? r2(raw(ks,'forwardEps')!)                    : null
-      priceToBook          = raw(ks, 'priceToBook')        != null ? Math.round(raw(ks,'priceToBook')! * 100)/100  : null
-      enterpriseValue      = raw(ks, 'enterpriseValue')
+      eps                  = raw(ks, 'trailingEps')        != null ? r2(raw(ks,'trailingEps')!)                   : eps
+      forwardEps           = raw(ks, 'forwardEps')         != null ? r2(raw(ks,'forwardEps')!)                    : forwardEps
+      priceToBook          = raw(ks, 'priceToBook')        != null ? Math.round(raw(ks,'priceToBook')! * 100)/100  : priceToBook
+      enterpriseValue      = raw(ks, 'enterpriseValue') ?? enterpriseValue
       enterpriseToRevenue  = raw(ks, 'enterpriseToRevenue') != null ? Math.round(raw(ks,'enterpriseToRevenue')!*100)/100 : null
       enterpriseToEbitda   = raw(ks, 'enterpriseToEbitda')  != null ? Math.round(raw(ks,'enterpriseToEbitda')!*100)/100  : null
-      beta                 = raw(ks, 'beta')                != null ? Math.round(raw(ks,'beta')! * 100) / 100 : null
+      beta                 = raw(ks, 'beta')                != null ? Math.round(raw(ks,'beta')! * 100) / 100 : beta
       shortRatio           = raw(ks, 'shortRatio')
       payoutRatio          = raw(ks, 'payoutRatio')
-      bookValue            = raw(ks, 'bookValue')           != null ? r2(raw(ks,'bookValue')!) : null
+      bookValue            = raw(ks, 'bookValue')           != null ? r2(raw(ks,'bookValue')!) : bookValue
       heldPercentInsiders  = raw(ks, 'heldPercentInsiders')      ?? raw(mh, 'insidersPercentHeld')
       heldPercentInstitutions = raw(ks,'heldPercentInstitutions') ?? raw(mh, 'institutionsPercentHeld')
 
@@ -384,6 +434,12 @@ export async function GET(req: NextRequest) {
       }
     }
 
+    // ── Unconditional fallbacks (survive total auth/v10 failure) ──────────────
+    // Chart meta and the raw price series let us always populate price + 52w range
+    // even when both v7 and v10 are blocked.
+    if (high52w == null) high52w = raw(meta, 'fiftyTwoWeekHigh') ?? r2(Math.max(...allCloses.slice(-252)))
+    if (low52w  == null) low52w  = raw(meta, 'fiftyTwoWeekLow')  ?? r2(Math.min(...allCloses.slice(-252)))
+
     // ── News ──────────────────────────────────────────────────────────────────
     const news: StockResult['news'] = []
     try {
@@ -466,10 +522,15 @@ export async function GET(req: NextRequest) {
       insiderTransactions, news,
     }
 
-    // Cache
-    try {
-      await admin.from('stock_cache').upsert({ ticker, interval, data: result, fetched_at: new Date().toISOString() }, { onConflict: 'ticker,interval' })
-    } catch { /* cache table not yet created */ }
+    // Cache — but only a "complete" result. If both v7 and v10 were blocked we end
+    // up with price + chart but no fundamentals; caching that would serve the empty
+    // result for 6h. Skip the write so the next request retries the auth/fetch.
+    const hasFundamentals = marketCap != null || peRatio != null || eps != null
+    if (hasFundamentals) {
+      try {
+        await admin.from('stock_cache').upsert({ ticker, interval, data: result, fetched_at: new Date().toISOString() }, { onConflict: 'ticker,interval' })
+      } catch { /* cache table not yet created */ }
+    }
 
     return NextResponse.json(result)
 
