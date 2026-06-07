@@ -46,7 +46,7 @@ interface AvanzaData {
 
 interface StockData {
   ticker: string; interval: string
-  currentPrice: number; change: number; changePercent: number
+  currentPrice: number; change: number; changePercent: number; periodChange: number; periodChangePercent: number
   marketCap: Num; peRatio: Num; dividendYield: Pct; high52w: Num; low52w: Num; eps: Num
   forwardEps: Num; priceToBook: Num; enterpriseValue: Num; enterpriseToRevenue: Num
   enterpriseToEbitda: Num; beta: Num; shortRatio: Num; payoutRatio: Pct
@@ -64,14 +64,14 @@ interface StockData {
   ohlcv: OHLCVBar[]
   sma50: { time: string; value: number }[]
   sma200: { time: string; value: number }[]
-  indicators: { rsi: Num; macd: Num; macdSignal: Num; macdHistogram: Num; bbUpper: Num; bbMiddle: Num; bbLower: Num; bbWidth: Num }
+  indicators: { rsi: Num; macd: Num; macdSignal: Num; macdHistogram: Num; bbUpper: Num; bbMiddle: Num; bbLower: Num; bbWidth: Num; stochK: Num; stochD: Num; atr: Num; williamsR: Num; cci: Num; roc: Num }
   incomeAnnual: IncomeRow[]; incomeQuarterly: IncomeRow[]
   balanceAnnual: BalanceRow[]; cashflowAnnual: CashRow[]
   earningsHistory: EarningsRow[]; earningsTrend: EstimateRow[]
   recommendationTrend: RecRow[]; upgradeDowngradeHistory: UpgradeRow[]
   insiderTransactions: InsiderRow[]
   avanza: AvanzaData | null
-  news: Array<{ title: string; source: string; link: string; publishedAt: string; sentiment: 'positive' | 'negative' | 'neutral' | null }>
+  news: Array<{ title: string; source: string; link: string; publishedAt: string; sentiment: 'positive' | 'negative' | 'neutral' | null; imageUrl: string | null }>
 }
 
 // ── Formatters ────────────────────────────────────────────────────────────────
@@ -340,6 +340,39 @@ function buildViewerContext(d: StockData): string {
   return lines.join('\n')
 }
 
+// ── Candlestick aggregation ───────────────────────────────────────────────────
+
+type CandleRes = '1D' | '1W' | '1M'
+
+function aggregateBars(bars: OHLCVBar[], res: CandleRes): OHLCVBar[] {
+  if (res === '1D') return bars
+  const groups = new Map<string, OHLCVBar[]>()
+  for (const bar of bars) {
+    const d = new Date(bar.time + 'T00:00:00Z')
+    let key: string
+    if (res === '1W') {
+      const dow = d.getUTCDay()
+      const monday = new Date(d)
+      monday.setUTCDate(d.getUTCDate() - ((dow + 6) % 7))
+      key = monday.toISOString().slice(0, 10)
+    } else {
+      key = bar.time.slice(0, 7) + '-01'
+    }
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key)!.push(bar)
+  }
+  return Array.from(groups.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, group]) => ({
+      time:   key,
+      open:   group[0].open,
+      high:   Math.max(...group.map(b => b.high)),
+      low:    Math.min(...group.map(b => b.low)),
+      close:  group[group.length - 1].close,
+      volume: group.reduce((s, b) => s + b.volume, 0),
+    }))
+}
+
 // ── Company name → ticker aliases ────────────────────────────────────────────
 
 const TICKER_ALIASES: Record<string, string> = {
@@ -407,6 +440,8 @@ export default function StockViewer({ initialTicker, initialInterval, onDataUpda
   const [error, setError]         = useState<string | null>(null)
   const [suggestions, setSuggestions] = useState<Array<{symbol: string; name: string; exchange: string}>>([])
   const [showDropdown, setShowDropdown] = useState(false)
+  const [candleRes, setCandleRes] = useState<CandleRes>('1D')
+  const [showAdvanced, setShowAdvanced] = useState(false)
 
   const chartContainerRef = useRef<HTMLDivElement>(null)
   const chartInstanceRef  = useRef<IChartApi | null>(null)
@@ -574,6 +609,8 @@ export default function StockViewer({ initialTicker, initialInterval, onDataUpda
 
     chartInstanceRef.current = chart
 
+    const bars = aggregateBars(stockData.ohlcv, candleRes)
+
     // Candlestick series
     const candleSeries = chart.addCandlestickSeries({
       upColor:        '#1D9E75',
@@ -584,7 +621,7 @@ export default function StockViewer({ initialTicker, initialInterval, onDataUpda
       wickDownColor:  '#D85A30',
     })
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    candleSeries.setData(stockData.ohlcv as any)
+    candleSeries.setData(bars as any)
 
     // Volume histogram — bottom 18% of chart
     chart.priceScale('volume').applyOptions({
@@ -596,7 +633,7 @@ export default function StockViewer({ initialTicker, initialInterval, onDataUpda
       priceScaleId: 'volume',
     })
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    volSeries.setData(stockData.ohlcv.map((d) => ({
+    volSeries.setData(bars.map((d) => ({
       time:  d.time,
       value: d.volume,
       color: d.close >= d.open ? 'rgba(29,158,117,0.35)' : 'rgba(216,90,48,0.35)',
@@ -635,7 +672,7 @@ export default function StockViewer({ initialTicker, initialInterval, onDataUpda
       chart.remove()
       chartInstanceRef.current = null
     }
-  }, [stockData])
+  }, [stockData, candleRes])
 
   // ── Derived ────────────────────────────────────────────────────────────────
 
@@ -733,11 +770,19 @@ export default function StockViewer({ initialTicker, initialInterval, onDataUpda
                     <span className="text-3xl font-bold text-gray-900 font-mono tabular-nums">
                       ${fmtPrice(stockData.currentPrice)}
                     </span>
-                    <span className={`flex items-center gap-1 text-base font-semibold ${isUp ? 'text-green-600' : 'text-red-500'}`}>
-                      {isUp ? <TrendingUp size={16} /> : <TrendingDown size={16} />}
-                      {isUp ? '+' : ''}{fmtPrice(Math.abs(stockData.change))}
-                      &nbsp;({isUp ? '+' : ''}{stockData.changePercent.toFixed(2)}%)
-                    </span>
+                    <div className="flex flex-col gap-0.5">
+                      <span className={`flex items-center gap-1 text-base font-semibold ${isUp ? 'text-green-600' : 'text-red-500'}`}>
+                        {isUp ? <TrendingUp size={16} /> : <TrendingDown size={16} />}
+                        {isUp ? '+' : ''}{fmtPrice(Math.abs(stockData.change))}
+                        &nbsp;({isUp ? '+' : ''}{stockData.changePercent.toFixed(2)}%)
+                        <span className="text-[10px] font-normal text-gray-400 ml-0.5">1D</span>
+                      </span>
+                      {stockData.periodChange != null && (
+                        <span className={`text-xs font-medium ${stockData.periodChangePercent >= 0 ? 'text-green-600' : 'text-red-500'}`}>
+                          {interval}: {stockData.periodChangePercent >= 0 ? '+' : ''}{stockData.periodChangePercent.toFixed(2)}%
+                        </span>
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>
@@ -771,22 +816,40 @@ export default function StockViewer({ initialTicker, initialInterval, onDataUpda
             {/* Candlestick chart */}
             <div className="bg-[#0f1117] rounded-xl overflow-hidden shadow-sm">
               {/* Toolbar */}
-              <div className="flex items-center justify-between px-4 pt-3.5 pb-3">
-                {/* Interval buttons */}
-                <div className="flex gap-1">
-                  {(['1M', '3M', '6M', '1Y'] as Interval[]).map((intv) => (
-                    <button
-                      key={intv}
-                      onClick={() => handleInterval(intv)}
-                      className={`px-3 py-1 rounded text-xs font-semibold transition-colors ${
-                        interval === intv
-                          ? 'bg-white/15 text-white'
-                          : 'text-gray-500 hover:text-gray-300 hover:bg-white/08'
-                      }`}
-                    >
-                      {intv}
-                    </button>
-                  ))}
+              <div className="flex items-center justify-between px-4 pt-3.5 pb-3 flex-wrap gap-2">
+                <div className="flex items-center gap-3">
+                  {/* Date range */}
+                  <div className="flex gap-1">
+                    {(['1M', '3M', '6M', '1Y'] as Interval[]).map((intv) => (
+                      <button
+                        key={intv}
+                        onClick={() => handleInterval(intv)}
+                        className={`px-3 py-1 rounded text-xs font-semibold transition-colors ${
+                          interval === intv
+                            ? 'bg-white/15 text-white'
+                            : 'text-gray-500 hover:text-gray-300 hover:bg-white/08'
+                        }`}
+                      >
+                        {intv}
+                      </button>
+                    ))}
+                  </div>
+                  {/* Candle resolution */}
+                  <div className="flex gap-1 border-l border-white/10 pl-3">
+                    {(['1D', '1W', '1M'] as CandleRes[]).map((res) => (
+                      <button
+                        key={res}
+                        onClick={() => setCandleRes(res)}
+                        className={`px-2.5 py-1 rounded text-xs font-semibold transition-colors ${
+                          candleRes === res
+                            ? 'bg-white/15 text-white'
+                            : 'text-gray-600 hover:text-gray-300 hover:bg-white/08'
+                        }`}
+                      >
+                        {res}
+                      </button>
+                    ))}
+                  </div>
                 </div>
                 {/* Legend */}
                 <div className="flex items-center gap-4 text-[11px] text-gray-500">
@@ -808,20 +871,25 @@ export default function StockViewer({ initialTicker, initialInterval, onDataUpda
             {/* Technical indicators */}
             {indicators && (
               <div className="bg-white rounded-xl p-5 shadow-sm">
-                <h2 className="font-semibold text-gray-800 mb-3 flex items-center gap-2 text-sm">
-                  <BarChart2 size={14} className="text-blue-500" />
-                  Technical Indicators
-                </h2>
+                <div className="flex items-center justify-between mb-3">
+                  <h2 className="font-semibold text-gray-800 flex items-center gap-2 text-sm">
+                    <BarChart2 size={14} className="text-blue-500" />
+                    Technical Indicators
+                    <span className="text-[10px] text-gray-400 font-normal">· Daily close, latest bar</span>
+                  </h2>
+                  <button
+                    onClick={() => setShowAdvanced(v => !v)}
+                    className="text-[11px] px-3 py-1 rounded-full border border-gray-200 text-gray-500 hover:border-blue-400 hover:text-blue-600 transition-colors"
+                  >
+                    {showAdvanced ? 'Basic' : 'Advanced'}
+                  </button>
+                </div>
                 <div className="flex flex-wrap gap-3">
 
                   {/* RSI */}
                   {indicators.rsi != null && (() => {
                     const v = indicators.rsi
-                    const cls = v > 70
-                      ? 'bg-red-50 text-red-700 border-red-200'
-                      : v < 30
-                        ? 'bg-green-50 text-green-700 border-green-200'
-                        : 'bg-gray-50 text-gray-700 border-gray-200'
+                    const cls = v > 70 ? 'bg-red-50 text-red-700 border-red-200' : v < 30 ? 'bg-green-50 text-green-700 border-green-200' : 'bg-gray-50 text-gray-700 border-gray-200'
                     const lbl = v > 70 ? 'Overbought' : v < 30 ? 'Oversold' : 'Neutral'
                     return (
                       <div className={`flex items-baseline gap-2 px-4 py-2.5 rounded-lg border text-sm ${cls}`}>
@@ -835,35 +903,97 @@ export default function StockViewer({ initialTicker, initialInterval, onDataUpda
                   {/* MACD */}
                   {indicators.macd != null && (() => {
                     const v = indicators.macd
-                    const cls = v >= 0
-                      ? 'bg-green-50 text-green-700 border-green-200'
-                      : 'bg-red-50 text-red-700 border-red-200'
+                    const cls = v >= 0 ? 'bg-green-50 text-green-700 border-green-200' : 'bg-red-50 text-red-700 border-red-200'
                     return (
                       <div className={`flex items-baseline gap-2 px-4 py-2.5 rounded-lg border text-sm ${cls}`}>
-                        <span className="text-[11px] font-semibold opacity-60">MACD</span>
+                        <span className="text-[11px] font-semibold opacity-60">MACD(12/26/9)</span>
                         <span className="text-lg font-bold tabular-nums">{v >= 0 ? '+' : ''}{v}</span>
                         {indicators.macdHistogram != null && (
-                          <span className="text-[11px] opacity-60">
-                            Hist: {indicators.macdHistogram >= 0 ? '+' : ''}{indicators.macdHistogram}
-                          </span>
+                          <span className="text-[11px] opacity-60">Hist: {indicators.macdHistogram >= 0 ? '+' : ''}{indicators.macdHistogram}</span>
                         )}
                       </div>
                     )
                   })()}
 
-                  {/* Bollinger Band Width */}
+                  {/* Bollinger Bands */}
                   {indicators.bbWidth != null && (
                     <div className="flex items-baseline gap-2 px-4 py-2.5 rounded-lg border border-gray-200 bg-gray-50 text-gray-700 text-sm">
-                      <span className="text-[11px] font-semibold opacity-60">BB Width</span>
+                      <span className="text-[11px] font-semibold opacity-60">BB(20,2)</span>
                       <span className="text-lg font-bold tabular-nums">{indicators.bbWidth.toFixed(2)}%</span>
                       {indicators.bbUpper != null && indicators.bbLower != null && (
-                        <span className="text-[11px] opacity-60">
-                          ${indicators.bbLower.toFixed(2)} – ${indicators.bbUpper.toFixed(2)}
-                        </span>
+                        <span className="text-[11px] opacity-60">${indicators.bbLower.toFixed(2)} – ${indicators.bbUpper.toFixed(2)}</span>
                       )}
                     </div>
                   )}
 
+                  {/* ── Advanced indicators ── */}
+                  {showAdvanced && <>
+
+                    {/* Stochastic */}
+                    {indicators.stochK != null && (() => {
+                      const k = indicators.stochK!
+                      const cls = k > 80 ? 'bg-red-50 text-red-700 border-red-200' : k < 20 ? 'bg-green-50 text-green-700 border-green-200' : 'bg-gray-50 text-gray-700 border-gray-200'
+                      const lbl = k > 80 ? 'Overbought' : k < 20 ? 'Oversold' : 'Neutral'
+                      return (
+                        <div className={`flex items-baseline gap-2 px-4 py-2.5 rounded-lg border text-sm ${cls}`}>
+                          <span className="text-[11px] font-semibold opacity-60">Stoch(14,3)</span>
+                          <span className="text-lg font-bold tabular-nums">{k}</span>
+                          {indicators.stochD != null && <span className="text-[11px] opacity-60">D: {indicators.stochD}</span>}
+                          <span className="text-[11px] opacity-60">· {lbl}</span>
+                        </div>
+                      )
+                    })()}
+
+                    {/* Williams %R */}
+                    {indicators.williamsR != null && (() => {
+                      const v = indicators.williamsR!
+                      const cls = v > -20 ? 'bg-red-50 text-red-700 border-red-200' : v < -80 ? 'bg-green-50 text-green-700 border-green-200' : 'bg-gray-50 text-gray-700 border-gray-200'
+                      const lbl = v > -20 ? 'Overbought' : v < -80 ? 'Oversold' : 'Neutral'
+                      return (
+                        <div className={`flex items-baseline gap-2 px-4 py-2.5 rounded-lg border text-sm ${cls}`}>
+                          <span className="text-[11px] font-semibold opacity-60">W%R(14)</span>
+                          <span className="text-lg font-bold tabular-nums">{v}</span>
+                          <span className="text-[11px] opacity-60">· {lbl}</span>
+                        </div>
+                      )
+                    })()}
+
+                    {/* CCI */}
+                    {indicators.cci != null && (() => {
+                      const v = indicators.cci!
+                      const cls = v > 100 ? 'bg-red-50 text-red-700 border-red-200' : v < -100 ? 'bg-green-50 text-green-700 border-green-200' : 'bg-gray-50 text-gray-700 border-gray-200'
+                      const lbl = v > 100 ? 'Overbought' : v < -100 ? 'Oversold' : 'Neutral'
+                      return (
+                        <div className={`flex items-baseline gap-2 px-4 py-2.5 rounded-lg border text-sm ${cls}`}>
+                          <span className="text-[11px] font-semibold opacity-60">CCI(20)</span>
+                          <span className="text-lg font-bold tabular-nums">{v}</span>
+                          <span className="text-[11px] opacity-60">· {lbl}</span>
+                        </div>
+                      )
+                    })()}
+
+                    {/* ATR */}
+                    {indicators.atr != null && (
+                      <div className="flex items-baseline gap-2 px-4 py-2.5 rounded-lg border border-gray-200 bg-gray-50 text-gray-700 text-sm">
+                        <span className="text-[11px] font-semibold opacity-60">ATR(14)</span>
+                        <span className="text-lg font-bold tabular-nums">${indicators.atr.toFixed(2)}</span>
+                        <span className="text-[11px] opacity-60">avg true range</span>
+                      </div>
+                    )}
+
+                    {/* ROC */}
+                    {indicators.roc != null && (() => {
+                      const v = indicators.roc!
+                      const cls = v >= 0 ? 'bg-green-50 text-green-700 border-green-200' : 'bg-red-50 text-red-700 border-red-200'
+                      return (
+                        <div className={`flex items-baseline gap-2 px-4 py-2.5 rounded-lg border text-sm ${cls}`}>
+                          <span className="text-[11px] font-semibold opacity-60">ROC(14)</span>
+                          <span className="text-lg font-bold tabular-nums">{v >= 0 ? '+' : ''}{v}%</span>
+                        </div>
+                      )
+                    })()}
+
+                  </>}
                 </div>
               </div>
             )}
@@ -894,38 +1024,42 @@ export default function StockViewer({ initialTicker, initialInterval, onDataUpda
             {/* News feed */}
             {news.length > 0 && (
               <div className="bg-white rounded-xl p-5 shadow-sm">
-                <h2 className="font-semibold text-gray-800 mb-3 flex items-center gap-2 text-sm">
+                <h2 className="font-semibold text-gray-800 mb-4 flex items-center gap-2 text-sm">
                   <Newspaper size={14} className="text-amber-500" />
                   Latest News
                 </h2>
-                <div className="space-y-2">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   {news.map((item, i) => (
                     <a
                       key={i}
                       href={item.link}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="flex items-start gap-3 p-3 rounded-lg border border-gray-100 hover:border-gray-200 hover:bg-gray-50 transition-colors group"
+                      className="flex flex-col rounded-xl border border-gray-100 overflow-hidden hover:border-gray-200 hover:shadow-md transition-all group"
                     >
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium text-gray-800 group-hover:text-blue-600 leading-snug">
+                      {item.imageUrl && (
+                        <div className="w-full h-36 bg-gray-100 overflow-hidden shrink-0">
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img src={item.imageUrl} alt="" className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
+                        </div>
+                      )}
+                      <div className="p-4 flex flex-col flex-1">
+                        <div className="flex items-center justify-between gap-2 mb-2">
+                          <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
+                            item.sentiment === 'positive' ? 'bg-green-100 text-green-700'
+                            : item.sentiment === 'negative' ? 'bg-red-100 text-red-700'
+                            : 'bg-gray-100 text-gray-500'
+                          }`}>
+                            {item.sentiment === 'positive' ? '▲ Positive' : item.sentiment === 'negative' ? '▼ Negative' : '● Neutral'}
+                          </span>
+                          <ExternalLink size={11} className="text-gray-300 group-hover:text-blue-400 shrink-0" />
+                        </div>
+                        <p className="text-sm font-semibold text-gray-800 group-hover:text-blue-700 leading-snug flex-1">
                           {item.title}
                         </p>
-                        <p className="text-xs text-gray-400 mt-1">
+                        <p className="text-xs text-gray-400 mt-2">
                           {item.source} · {fmtDate(item.publishedAt)}
                         </p>
-                      </div>
-                      <div className="flex items-center gap-2 shrink-0">
-                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${
-                          item.sentiment === 'positive' ? 'bg-green-100 text-green-700'
-                          : item.sentiment === 'negative' ? 'bg-red-100 text-red-700'
-                          : 'bg-gray-100 text-gray-500'
-                        }`}>
-                          {item.sentiment === 'positive' ? '▲ Positive'
-                            : item.sentiment === 'negative' ? '▼ Negative'
-                            : '● Neutral'}
-                        </span>
-                        <ExternalLink size={12} className="text-gray-300 group-hover:text-blue-400" />
                       </div>
                     </a>
                   ))}
@@ -1031,9 +1165,78 @@ export default function StockViewer({ initialTicker, initialInterval, onDataUpda
               </div>
             </SectionCard>
 
+            {/* ── Analyst price targets ────────────────────────────────── */}
+            {stockData.targetMeanPrice != null && (
+              <div className="bg-white rounded-xl p-5 shadow-sm">
+                <h2 className="font-semibold text-gray-800 mb-4 flex items-center gap-2 text-sm">
+                  <TrendingUp size={14} className="text-green-500" />
+                  Analyst Price Targets
+                  {stockData.numberOfAnalysts != null && (
+                    <span className="ml-1 text-[11px] text-gray-400 font-normal">{stockData.numberOfAnalysts} analysts</span>
+                  )}
+                </h2>
+                {(() => {
+                  const lo  = stockData.targetLowPrice  ?? stockData.currentPrice
+                  const hi  = stockData.targetHighPrice ?? stockData.currentPrice
+                  const mn  = stockData.targetMeanPrice!
+                  const cur = stockData.currentPrice
+                  const rangeMin = Math.min(lo, cur) * 0.97
+                  const rangeMax = Math.max(hi, cur) * 1.03
+                  const span = rangeMax - rangeMin
+                  const pct = (v: number) => Math.max(0, Math.min(100, ((v - rangeMin) / span) * 100))
+                  const upside = ((mn - cur) / cur * 100).toFixed(1)
+                  return (
+                    <div className="space-y-4">
+                      <div className="flex items-center justify-between text-xs text-gray-500">
+                        <span>Low <span className="font-mono font-bold text-gray-700">${lo.toFixed(2)}</span></span>
+                        <span className={`font-semibold text-sm ${mn >= cur ? 'text-green-600' : 'text-red-500'}`}>
+                          Mean ${mn.toFixed(2)} ({mn >= cur ? '+' : ''}{upside}% upside)
+                        </span>
+                        <span>High <span className="font-mono font-bold text-gray-700">${hi.toFixed(2)}</span></span>
+                      </div>
+                      <div className="relative h-3 bg-gray-100 rounded-full">
+                        <div
+                          className="absolute h-full bg-blue-100 rounded-full"
+                          style={{ left: `${pct(lo)}%`, width: `${pct(hi) - pct(lo)}%` }}
+                        />
+                        <div
+                          className="absolute top-1/2 -translate-y-1/2 w-3 h-3 rounded-full bg-blue-500 border-2 border-white shadow"
+                          style={{ left: `calc(${pct(mn)}% - 6px)` }}
+                          title={`Mean target: $${mn.toFixed(2)}`}
+                        />
+                        <div
+                          className="absolute top-1/2 -translate-y-1/2 w-2.5 h-4 rounded bg-gray-800 border border-white shadow"
+                          style={{ left: `calc(${pct(cur)}% - 5px)` }}
+                          title={`Current: $${cur.toFixed(2)}`}
+                        />
+                      </div>
+                      <div className="flex items-center gap-3 text-[11px] text-gray-400">
+                        <span className="flex items-center gap-1.5"><span className="w-2.5 h-4 rounded bg-gray-800 inline-block" /> Current ${cur.toFixed(2)}</span>
+                        <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded-full bg-blue-500 inline-block" /> Mean target</span>
+                        <span className="flex items-center gap-1.5"><span className="w-6 h-2.5 rounded bg-blue-100 inline-block" /> Analyst range</span>
+                      </div>
+                      {stockData.recommendationKey && (
+                        <div className="flex gap-2 flex-wrap mt-1">
+                          <span className={`px-3 py-1.5 rounded-lg text-xs font-bold uppercase ${
+                            ['buy','strong buy','strongbuy'].includes(stockData.recommendationKey.toLowerCase())
+                              ? 'bg-green-100 text-green-700'
+                              : ['sell','strong sell','strongsell'].includes(stockData.recommendationKey.toLowerCase())
+                                ? 'bg-red-100 text-red-700'
+                                : 'bg-blue-50 text-blue-700'
+                          }`}>
+                            {stockData.recommendationKey}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  )
+                })()}
+              </div>
+            )}
+
             {/* ── Analyst consensus ────────────────────────────────────── */}
             {(stockData.targetMeanPrice || stockData.recommendationKey) && (
-              <SectionCard title="Analyst Consensus" icon={<TrendingUp size={14} className="text-green-500" />}>
+              <SectionCard title="Analyst Details" icon={<TrendingUp size={14} className="text-green-500" />}>
                 <div className="flex flex-wrap gap-3 mb-3">
                   {stockData.recommendationKey && (
                     <div className="px-4 py-2 bg-blue-50 text-blue-700 rounded-lg text-sm font-bold uppercase">{stockData.recommendationKey}</div>

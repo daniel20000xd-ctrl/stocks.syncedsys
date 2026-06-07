@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { createAdminClient } from '@/lib/supabase/admin'
-import { RSI, SMA, MACD, BollingerBands } from 'technicalindicators'
+import { RSI, SMA, MACD, BollingerBands, Stochastic, ATR, WilliamsR, CCI, ROC } from 'technicalindicators'
 import { fetchAvanzaData, isSwedishTicker, type AvanzaData } from '@/lib/avanza'
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -22,7 +22,7 @@ interface InsiderRow  { date: string; name: string; shares: Num; value: Num; des
 
 interface StockResult {
   ticker: string; interval: string
-  currentPrice: number; change: number; changePercent: number
+  currentPrice: number; change: number; changePercent: number; periodChange: number; periodChangePercent: number
   // ── Price module ──
   marketCap: Num; peRatio: Num; dividendYield: Pct; high52w: Num; low52w: Num; eps: Num
   // ── Key stats ──
@@ -56,11 +56,12 @@ interface StockResult {
   indicators: {
     rsi: Num; macd: Num; macdSignal: Num; macdHistogram: Num
     bbUpper: Num; bbMiddle: Num; bbLower: Num; bbWidth: Num
+    stochK: Num; stochD: Num; atr: Num; williamsR: Num; cci: Num; roc: Num
   }
   // ── Insider transactions ──
   insiderTransactions: InsiderRow[]
   // ── News ──
-  news: Array<{ title: string; source: string; link: string; publishedAt: string; sentiment: 'positive' | 'negative' | 'neutral' }>
+  news: Array<{ title: string; source: string; link: string; publishedAt: string; sentiment: 'positive' | 'negative' | 'neutral'; imageUrl: string | null }>
   // ── Nordic supplement (Avanza, Swedish tickers only; null if unavailable) ──
   avanza: AvanzaData | null
 }
@@ -180,6 +181,8 @@ export async function GET(req: NextRequest) {
     if (!allBars.length) return NextResponse.json({ error: `No usable OHLCV data for "${ticker}".` }, { status: 404 })
 
     const allCloses = allBars.map(b => b.close)
+    const allHighs  = allBars.map(b => b.high)
+    const allLows   = allBars.map(b => b.low)
     const allDates  = allBars.map(b => b.time)
     const chartStartStr = getChartStart(interval, new Date())
     const ohlcv = allBars.filter(b => b.time >= chartStartStr)
@@ -192,16 +195,22 @@ export async function GET(req: NextRequest) {
     const sma50  = sma50Raw .map((v,i) => ({ time: allDates[sma50off+i],  value: r2(v) })).filter(d => d.time >= chartStartStr)
     const sma200 = sma200Raw.map((v,i) => ({ time: allDates[sma200off+i], value: r2(v) })).filter(d => d.time >= chartStartStr)
 
-    const rsiRaw  = RSI.calculate({ period: 14, values: allCloses })
-    const macdRaw = MACD.calculate({ values: allCloses, fastPeriod: 12, slowPeriod: 26, signalPeriod: 9, SimpleMAOscillator: false, SimpleMASignal: false })
-    const bbRaw   = BollingerBands.calculate({ period: 20, values: allCloses, stdDev: 2 })
-    const lm = macdRaw.length ? macdRaw[macdRaw.length - 1] : null
-    const lb = bbRaw.length   ? bbRaw[bbRaw.length - 1]     : null
+    const rsiRaw   = RSI.calculate({ period: 14, values: allCloses })
+    const macdRaw  = MACD.calculate({ values: allCloses, fastPeriod: 12, slowPeriod: 26, signalPeriod: 9, SimpleMAOscillator: false, SimpleMASignal: false })
+    const bbRaw    = BollingerBands.calculate({ period: 20, values: allCloses, stdDev: 2 })
+    const stochRaw = Stochastic.calculate({ high: allHighs, low: allLows, close: allCloses, period: 14, signalPeriod: 3 })
+    const atrRaw   = ATR.calculate({ high: allHighs, low: allLows, close: allCloses, period: 14 })
+    const wrRaw    = WilliamsR.calculate({ low: allLows, high: allHighs, close: allCloses, period: 14 })
+    const cciRaw   = CCI.calculate({ high: allHighs, low: allLows, close: allCloses, period: 20 })
+    const rocRaw   = ROC.calculate({ values: allCloses, period: 14 })
+    const lm     = macdRaw.length  ? macdRaw[macdRaw.length - 1]   : null
+    const lb     = bbRaw.length    ? bbRaw[bbRaw.length - 1]        : null
+    const lStoch = stochRaw.length ? stochRaw[stochRaw.length - 1]  : null
 
     // ── 3. Fundamentals — two parallel quoteSummary calls ─────────────────────
     const meta = r0.meta ?? {}
     let currentPrice = r2((meta.regularMarketPrice as number|undefined) ?? allBars[allBars.length-1].close)
-    let prevClose    = r2((meta.chartPreviousClose  as number|undefined) ?? (meta.previousClose as number|undefined) ?? (allBars.length > 1 ? allBars[allBars.length-2].close : currentPrice))
+    let prevClose    = r2(allBars.length > 1 ? allBars[allBars.length-2].close : currentPrice)
 
     // Nulled-out defaults for all optional fields
     let marketCap:Num=null, peRatio:Num=null, dividendYield:Pct=null, high52w:Num=null, low52w:Num=null, eps:Num=null
@@ -229,11 +238,30 @@ export async function GET(req: NextRequest) {
     const upgradeDowngradeHistory: UpgradeRow[] = []
     const insiderTransactions:     InsiderRow[]  = []
 
-    // Run both quoteSummary batches in parallel; failures are soft
-    const [s1, s2] = await Promise.allSettled([
+    // Run v7 quote + both quoteSummary batches in parallel; all failures are soft
+    const [q0, s1, s2] = await Promise.allSettled([
+      yfGet(`${YF1}/v7/finance/quote?symbols=${encodeURIComponent(ticker)}`),
       yfGet(`${YF2}/v10/finance/quoteSummary/${encodeURIComponent(ticker)}?modules=price,summaryDetail,defaultKeyStatistics,financialData,assetProfile,calendarEvents,majorHoldersBreakdown`),
       yfGet(`${YF2}/v10/finance/quoteSummary/${encodeURIComponent(ticker)}?modules=incomeStatementHistory,incomeStatementHistoryQuarterly,balanceSheetHistory,cashflowStatementHistory,earningsHistory,earningsTrend,recommendationTrend,upgradeDowngradeHistory,insiderTransactions`),
     ])
+
+    // ── Parse v7 quote (reliable baseline — fills in when v10 is blocked) ──────
+    if (q0.status === 'fulfilled') {
+      const q = q0.value?.quoteResponse?.result?.[0] ?? {}
+      if (q.regularMarketPrice != null)         currentPrice  = r2(q.regularMarketPrice as number)
+      if (q.regularMarketPreviousClose != null)  prevClose     = r2(q.regularMarketPreviousClose as number)
+      if (q.marketCap != null)                   marketCap     = q.marketCap as number
+      if (q.trailingPE != null)                  peRatio       = Math.round((q.trailingPE as number) * 10) / 10
+      if (q.epsTrailingTwelveMonths != null)      eps           = r2(q.epsTrailingTwelveMonths as number)
+      if (q.fiftyTwoWeekHigh != null)             high52w       = r2(q.fiftyTwoWeekHigh as number)
+      if (q.fiftyTwoWeekLow != null)              low52w        = r2(q.fiftyTwoWeekLow as number)
+      if (q.trailingAnnualDividendYield != null)  dividendYield = q.trailingAnnualDividendYield as number
+      if (q.epsForward != null)                   forwardEps    = r2(q.epsForward as number)
+      if (q.priceToBook != null)                  priceToBook   = r2(q.priceToBook as number)
+      if (q.bookValue != null)                    bookValue     = r2(q.bookValue as number)
+      if (q.beta != null)                         beta          = Math.round((q.beta as number) * 100) / 100
+      if (q.marketCap != null)                    enterpriseValue = q.marketCap as number
+    }
 
     // ── Parse batch 1 ────────────────────────────────────────────────────────
     if (s1.status === 'fulfilled') {
@@ -362,13 +390,18 @@ export async function GET(req: NextRequest) {
       const searchData = await yfGet(`${YF1}/v1/finance/search?q=${encodeURIComponent(ticker)}&newsCount=10&enableFuzzyQuery=false&quotesCount=0`)
       for (const item of (searchData?.news ?? []) as Record<string,unknown>[]) {
         const title = (item.title as string) ?? ''
-        news.push({ title, source: (item.publisher as string) ?? 'Unknown', link: (item.link as string) ?? '#', publishedAt: item.providerPublishTime ? new Date((item.providerPublishTime as number) * 1000).toISOString() : new Date().toISOString(), sentiment: sentiment(title) })
+        const thumbResolutions = (item.thumbnail as {resolutions?: {url: string; width: number}[]} | undefined)?.resolutions ?? []
+        const imageUrl = thumbResolutions.find(r => r.width >= 140)?.url ?? thumbResolutions[0]?.url ?? null
+        news.push({ title, source: (item.publisher as string) ?? 'Unknown', link: (item.link as string) ?? '#', publishedAt: item.providerPublishTime ? new Date((item.providerPublishTime as number) * 1000).toISOString() : new Date().toISOString(), sentiment: sentiment(title), imageUrl })
       }
     } catch { /* news optional */ }
 
     // ── Assemble ──────────────────────────────────────────────────────────────
     const change        = r2(currentPrice - prevClose)
     const changePercent = prevClose > 0 ? Math.round((change / prevClose) * 10000) / 100 : 0
+    const periodFirstClose    = ohlcv[0]?.close ?? currentPrice
+    const periodChange        = r2(currentPrice - periodFirstClose)
+    const periodChangePercent = periodFirstClose > 0 ? Math.round((periodChange / periodFirstClose) * 10000) / 100 : 0
 
     // ── Nordic supplement (Avanza) — Swedish tickers only ──────────────────────
     // fetchAvanzaData never throws and self-times-out; on any problem it returns
@@ -399,7 +432,7 @@ export async function GET(req: NextRequest) {
     }
 
     const result: StockResult = {
-      ticker, interval, currentPrice, change, changePercent,
+      ticker, interval, currentPrice, change, changePercent, periodChange, periodChangePercent,
       marketCap, peRatio, dividendYield, high52w, low52w, eps,
       forwardEps, priceToBook, enterpriseValue, enterpriseToRevenue, enterpriseToEbitda,
       beta, shortRatio, payoutRatio, bookValue, heldPercentInsiders, heldPercentInstitutions,
@@ -421,6 +454,12 @@ export async function GET(req: NextRequest) {
         bbMiddle: lb?.middle != null ? r2(lb.middle) : null,
         bbLower:  lb?.lower  != null ? r2(lb.lower)  : null,
         bbWidth:  lb?.upper != null && lb.lower != null && lb.middle && lb.middle > 0 ? Math.round(((lb.upper - lb.lower) / lb.middle) * 10000) / 100 : null,
+        stochK:   lStoch?.k != null ? Math.round(lStoch.k * 10) / 10 : null,
+        stochD:   lStoch?.d != null ? Math.round(lStoch.d * 10) / 10 : null,
+        atr:      atrRaw.length ? r2(atrRaw[atrRaw.length-1]) : null,
+        williamsR: wrRaw.length ? Math.round(wrRaw[wrRaw.length-1] * 10) / 10 : null,
+        cci:      cciRaw.length ? Math.round(cciRaw[cciRaw.length-1] * 10) / 10 : null,
+        roc:      rocRaw.length ? Math.round(rocRaw[rocRaw.length-1] * 100) / 100 : null,
       },
       incomeAnnual, incomeQuarterly, balanceAnnual, cashflowAnnual,
       earningsHistory, earningsTrend, recommendationTrend, upgradeDowngradeHistory,
