@@ -7,6 +7,6 @@ import dynamic from 'next/dynamic'
 
 const StockViewer = dynamic(() => import('./StockViewer'), { ssr: false })
 
-export default function StockViewerWrapper() {
-  return <StockViewer />
+export default function StockViewerWrapper({ isAdmin }: { isAdmin?: boolean }) {
+  return <StockViewer isAdmin={isAdmin} />
 }

@@ -6,6 +6,7 @@ import type { IChartApi } from 'lightweight-charts'
 import {
   Search, TrendingUp, TrendingDown, BarChart2,
   BookOpen, Newspaper, RefreshCw, ExternalLink,
+  Bell, BellOff, Trash2,
 } from 'lucide-react'
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -162,6 +163,241 @@ function Stat({ label, value }: { label: string; value: string }) {
     <div className="bg-gray-50 rounded-lg px-3 py-2.5">
       <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-0.5">{label}</p>
       <p className="text-sm font-bold text-gray-800">{value}</p>
+    </div>
+  )
+}
+
+// ── Stock Alerts (admin-only inline panel) ────────────────────────────────────
+
+interface AlertItem {
+  id: string
+  ticker: string
+  condition: 'price_above' | 'price_below' | 'change_pct_above' | 'change_pct_below'
+  threshold: number
+  is_active: boolean
+  last_triggered_at: string | null
+  triggered_count: number
+  cooldown_minutes: number
+  created_at: string
+}
+
+const CONDITION_LABELS: Record<string, string> = {
+  price_above:      'Price above',
+  price_below:      'Price below',
+  change_pct_above: 'Daily gain >',
+  change_pct_below: 'Daily loss <',
+}
+
+function conditionDisplay(a: AlertItem): string {
+  const prefix = CONDITION_LABELS[a.condition] ?? a.condition
+  const isPct  = a.condition.startsWith('change')
+  return `${prefix} ${isPct ? '' : '$'}${a.threshold}${isPct ? '%' : ''}`
+}
+
+function isHitNow(a: AlertItem, price: number, changePct: number): boolean {
+  const t = a.threshold
+  switch (a.condition) {
+    case 'price_above':      return price    > t
+    case 'price_below':      return price    < t
+    case 'change_pct_above': return changePct > t
+    case 'change_pct_below': return changePct < t
+    default:                 return false
+  }
+}
+
+function timeAgo(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime()
+  const m = Math.floor(diff / 60_000)
+  if (m < 60)   return `${m}m ago`
+  const h = Math.floor(m / 60)
+  if (h < 24)   return `${h}h ago`
+  return `${Math.floor(h / 24)}d ago`
+}
+
+function StockAlerts({ ticker, currentPrice, changePercent }: { ticker: string; currentPrice: number; changePercent: number }) {
+  const [alerts, setAlerts]         = useState<AlertItem[]>([])
+  const [loading, setLoading]       = useState(true)
+  const [condition, setCondition]   = useState('price_above')
+  const [threshold, setThreshold]   = useState('')
+  const [cooldown, setCooldown]     = useState('60')
+  const [saving, setSaving]         = useState(false)
+  const [deleting, setDeleting]     = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setLoading(true)
+    fetch(`/api/alerts?ticker=${encodeURIComponent(ticker)}`)
+      .then(r => r.json())
+      .then(d => { if (!cancelled) setAlerts(d.alerts ?? []) })
+      .catch(() => {})
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [ticker])
+
+  async function addAlert() {
+    const val = parseFloat(threshold)
+    if (isNaN(val)) return
+    setSaving(true)
+    try {
+      const res = await fetch('/api/alerts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ticker, condition, threshold: val, cooldown_minutes: parseInt(cooldown) }),
+      })
+      if (res.ok) {
+        const { alert } = await res.json()
+        setAlerts(prev => [alert, ...prev])
+        setThreshold('')
+      }
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function toggleAlert(id: string, current: boolean) {
+    setAlerts(prev => prev.map(a => a.id === id ? { ...a, is_active: !current } : a))
+    await fetch(`/api/alerts/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ is_active: !current }),
+    })
+  }
+
+  async function deleteAlert(id: string) {
+    setDeleting(id)
+    setAlerts(prev => prev.filter(a => a.id !== id))
+    await fetch(`/api/alerts/${id}`, { method: 'DELETE' })
+    setDeleting(null)
+  }
+
+  const isPct        = condition.startsWith('change')
+  const placeholder  = isPct
+    ? (changePercent >= 0 ? `+${changePercent.toFixed(2)}` : changePercent.toFixed(2))
+    : currentPrice.toFixed(2)
+
+  return (
+    <div className="bg-white rounded-xl p-5 shadow-sm">
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="font-semibold text-gray-800 flex items-center gap-2 text-sm">
+          <Bell size={14} className="text-amber-500" />
+          Alerts — <span className="font-mono">{ticker}</span>
+        </h2>
+        {loading && <span className="text-[10px] text-gray-400 animate-pulse">loading…</span>}
+      </div>
+
+      {/* Alert list */}
+      {!loading && alerts.length === 0 && (
+        <p className="text-xs text-gray-400 mb-3">No alerts set. Add one below.</p>
+      )}
+      {alerts.length > 0 && (
+        <div className="space-y-1.5 mb-4">
+          {alerts.map(a => {
+            const hit = isHitNow(a, currentPrice, changePercent)
+            return (
+              <div
+                key={a.id}
+                className={`flex items-center justify-between px-3 py-2 rounded-lg border transition-colors ${
+                  hit && a.is_active
+                    ? 'bg-amber-50 border-amber-200'
+                    : 'bg-gray-50 border-transparent'
+                }`}
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <button
+                    onClick={() => toggleAlert(a.id, a.is_active)}
+                    className={`shrink-0 transition-colors ${a.is_active ? 'text-green-500 hover:text-gray-400' : 'text-gray-300 hover:text-green-500'}`}
+                    title={a.is_active ? 'Disable alert' : 'Enable alert'}
+                  >
+                    {a.is_active ? <Bell size={13} /> : <BellOff size={13} />}
+                  </button>
+                  <span className={`text-xs font-semibold font-mono ${a.is_active ? 'text-gray-800' : 'text-gray-400'}`}>
+                    {conditionDisplay(a)}
+                  </span>
+                  {hit && a.is_active && (
+                    <span className="text-[9px] font-bold bg-amber-400 text-white px-1.5 py-0.5 rounded uppercase tracking-wide">
+                      live
+                    </span>
+                  )}
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  {a.last_triggered_at && (
+                    <span className="text-[10px] text-gray-400 tabular-nums">
+                      {a.triggered_count}× · {timeAgo(a.last_triggered_at)}
+                    </span>
+                  )}
+                  <span className="text-[10px] text-gray-300">{a.cooldown_minutes}m</span>
+                  <button
+                    onClick={() => deleteAlert(a.id)}
+                    disabled={deleting === a.id}
+                    className="text-gray-300 hover:text-red-500 transition-colors"
+                    title="Delete alert"
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      {/* Add form */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <select
+          value={condition}
+          onChange={e => setCondition(e.target.value)}
+          className="text-xs border border-gray-200 rounded-lg px-2.5 py-2 bg-white text-gray-700 focus:outline-none focus:border-blue-400"
+        >
+          <option value="price_above">Price above</option>
+          <option value="price_below">Price below</option>
+          <option value="change_pct_above">Daily gain &gt;</option>
+          <option value="change_pct_below">Daily loss &lt;</option>
+        </select>
+
+        <div className="relative">
+          {!isPct && (
+            <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-xs text-gray-400 pointer-events-none">$</span>
+          )}
+          <input
+            type="number"
+            step="any"
+            value={threshold}
+            onChange={e => setThreshold(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && addAlert()}
+            placeholder={placeholder}
+            className="text-xs border border-gray-200 rounded-lg py-2 w-28 focus:outline-none focus:border-blue-400 tabular-nums"
+            style={{ paddingLeft: isPct ? '10px' : '20px', paddingRight: isPct ? '20px' : '10px' }}
+          />
+          {isPct && (
+            <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-xs text-gray-400 pointer-events-none">%</span>
+          )}
+        </div>
+
+        <div className="relative">
+          <input
+            type="number"
+            step="1"
+            min="5"
+            value={cooldown}
+            onChange={e => setCooldown(e.target.value)}
+            className="text-xs border border-gray-200 rounded-lg py-2 w-16 text-center focus:outline-none focus:border-blue-400 tabular-nums"
+            title="Cooldown minutes (min gap between repeat alerts)"
+          />
+          <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-gray-400 pointer-events-none">m</span>
+        </div>
+
+        <button
+          onClick={addAlert}
+          disabled={saving || !threshold}
+          className="text-xs bg-gray-900 text-white px-3.5 py-2 rounded-lg font-semibold hover:bg-gray-700 disabled:opacity-40 transition-colors"
+        >
+          {saving ? '…' : 'Add alert'}
+        </button>
+      </div>
+      <p className="text-[10px] text-gray-400 mt-2">
+        Checked every 15 min. Cooldown = min wait between repeat emails.
+        {isPct && <span> Use negative values for loss alerts (e.g. −5 = down 5%).</span>}
+      </p>
     </div>
   )
 }
@@ -491,9 +727,10 @@ interface StockViewerProps {
   initialInterval?: Interval
   onDataUpdate?: (context: string) => void
   onConfigUpdate?: (ticker: string, interval: string) => void
+  isAdmin?: boolean
 }
 
-export default function StockViewer({ initialTicker, initialInterval, onDataUpdate, onConfigUpdate }: StockViewerProps = {}) {
+export default function StockViewer({ initialTicker, initialInterval, onDataUpdate, onConfigUpdate, isAdmin = false }: StockViewerProps = {}) {
   const [tickerInput, setTickerInput] = useState(initialTicker ?? '')
   const [activeTicker, setActiveTicker] = useState(initialTicker ?? '')
   const [interval, setIntervalState] = useState<Interval>((initialInterval as Interval) ?? '1Y')
@@ -979,6 +1216,15 @@ export default function StockViewer({ initialTicker, initialInterval, onDataUpda
                 <Stat label="Div Yield"    value={stockData.dividendYield!= null ? `${stockData.dividendYield}%`        : '—'} />
               </div>
             </div>
+
+            {/* Alerts — admin only */}
+            {isAdmin && (
+              <StockAlerts
+                ticker={stockData.ticker}
+                currentPrice={stockData.currentPrice}
+                changePercent={stockData.changePercent}
+              />
+            )}
 
             {/* Related stocks */}
             {RELATED_STOCKS[stockData.ticker] && (

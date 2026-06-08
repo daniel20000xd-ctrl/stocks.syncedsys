@@ -2,6 +2,12 @@
   "framework": "nextjs",
   "buildCommand": "next build",
   "outputDirectory": ".next",
+  "crons": [
+    {
+      "path": "/api/cron/check-alerts",
+      "schedule": "*/15 * * * *"
+    }
+  ],
   "headers": [
     {
       "source": "/(.*)",

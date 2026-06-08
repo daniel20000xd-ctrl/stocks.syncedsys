@@ -29,5 +29,6 @@ export default async function StocksPage({
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) redirect('/login')
 
-  return <StockViewerWrapper />
+  const isAdmin = user.email === (process.env.ADMIN_EMAIL ?? 'daniel20000xd@gmail.com')
+  return <StockViewerWrapper isAdmin={isAdmin} />
 }
