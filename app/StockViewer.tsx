@@ -47,6 +47,9 @@ interface AvanzaData {
 interface StockData {
   ticker: string; interval: string
   currentPrice: number; change: number; changePercent: number; periodChange: number; periodChangePercent: number
+  marketState: string | null
+  preMarketPrice: Num; preMarketChange: Num; preMarketChangePercent: Num
+  postMarketPrice: Num; postMarketChange: Num; postMarketChangePercent: Num
   marketCap: Num; peRatio: Num; dividendYield: Pct; high52w: Num; low52w: Num; eps: Num
   forwardEps: Num; priceToBook: Num; enterpriseValue: Num; enterpriseToRevenue: Num
   enterpriseToEbitda: Num; beta: Num; shortRatio: Num; payoutRatio: Pct
@@ -188,6 +191,11 @@ function buildViewerContext(d: StockData): string {
   h('CURRENT PRICE')
   lines.push(`  ${d.ticker}  $${d.currentPrice.toFixed(2)}  (${S(d.change)} / ${S(d.changePercent)}% — 1 day)`)
   lines.push(`  Period change (${d.interval}): ${S(d.periodChangePercent)}%`)
+  if (d.marketState) lines.push(`  Market state: ${d.marketState}`)
+  if ((d.marketState === 'PRE' || d.marketState === 'PREPRE') && d.preMarketPrice != null)
+    lines.push(`  Pre-market: $${d.preMarketPrice.toFixed(2)}  (${d.preMarketChange != null ? S(d.preMarketChange) : '?'} / ${d.preMarketChangePercent != null ? S(d.preMarketChangePercent) + '%' : '?'})`)
+  if ((d.marketState === 'POST' || d.marketState === 'POSTPOST' || d.marketState === 'CLOSED') && d.postMarketPrice != null)
+    lines.push(`  After hours: $${d.postMarketPrice.toFixed(2)}  (${d.postMarketChange != null ? S(d.postMarketChange) : '?'} / ${d.postMarketChangePercent != null ? S(d.postMarketChangePercent) + '%' : '?'})`)
   if (d.sector)  lines.push(`  Sector: ${d.sector}  |  Industry: ${d.industry ?? 'N/A'}`)
   if (d.country) lines.push(`  Country: ${d.country}${d.employees ? `  |  Employees: ${d.employees.toLocaleString()}` : ''}`)
   if (d.website) lines.push(`  Website: ${d.website}`)
@@ -895,7 +903,22 @@ export default function StockViewer({ initialTicker, initialInterval, onDataUpda
             <div className="bg-white rounded-xl p-5 shadow-sm">
               <div className="flex items-start justify-between flex-wrap gap-4 mb-4">
                 <div>
-                  <p className="text-sm font-semibold text-gray-400 font-mono mb-0.5">{stockData.ticker}</p>
+                  <div className="flex items-center gap-2 mb-0.5">
+                    <p className="text-sm font-semibold text-gray-400 font-mono">{stockData.ticker}</p>
+                    {stockData.marketState && stockData.marketState !== 'REGULAR' && (
+                      <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wide ${
+                        stockData.marketState === 'PRE' || stockData.marketState === 'PREPRE'
+                          ? 'bg-amber-100 text-amber-700'
+                          : stockData.marketState === 'POST' || stockData.marketState === 'POSTPOST'
+                          ? 'bg-purple-100 text-purple-700'
+                          : 'bg-gray-100 text-gray-500'
+                      }`}>
+                        {stockData.marketState === 'PRE' || stockData.marketState === 'PREPRE' ? 'Pre-Market'
+                          : stockData.marketState === 'POST' || stockData.marketState === 'POSTPOST' ? 'After Hours'
+                          : 'Closed'}
+                      </span>
+                    )}
+                  </div>
                   <div className="flex items-baseline gap-3 flex-wrap">
                     <span className="text-3xl font-bold text-gray-900 font-mono tabular-nums">
                       ${fmtPrice(stockData.currentPrice)}
@@ -914,6 +937,36 @@ export default function StockViewer({ initialTicker, initialInterval, onDataUpda
                       )}
                     </div>
                   </div>
+                  {/* Pre-market price */}
+                  {(stockData.marketState === 'PRE' || stockData.marketState === 'PREPRE') && stockData.preMarketPrice != null && (
+                    <div className="mt-2 flex items-center gap-2">
+                      <span className="text-xs text-gray-400">Pre-market</span>
+                      <span className="text-base font-bold font-mono tabular-nums text-gray-900">
+                        ${fmtPrice(stockData.preMarketPrice)}
+                      </span>
+                      {stockData.preMarketChange != null && stockData.preMarketChangePercent != null && (
+                        <span className={`text-xs font-semibold ${stockData.preMarketChange >= 0 ? 'text-amber-600' : 'text-red-500'}`}>
+                          {stockData.preMarketChange >= 0 ? '+' : ''}{fmtPrice(Math.abs(stockData.preMarketChange))}
+                          &nbsp;({stockData.preMarketChange >= 0 ? '+' : ''}{stockData.preMarketChangePercent.toFixed(2)}%)
+                        </span>
+                      )}
+                    </div>
+                  )}
+                  {/* After-hours price */}
+                  {(stockData.marketState === 'POST' || stockData.marketState === 'POSTPOST' || stockData.marketState === 'CLOSED') && stockData.postMarketPrice != null && (
+                    <div className="mt-2 flex items-center gap-2">
+                      <span className="text-xs text-gray-400">After hours</span>
+                      <span className="text-base font-bold font-mono tabular-nums text-gray-900">
+                        ${fmtPrice(stockData.postMarketPrice)}
+                      </span>
+                      {stockData.postMarketChange != null && stockData.postMarketChangePercent != null && (
+                        <span className={`text-xs font-semibold ${stockData.postMarketChange >= 0 ? 'text-purple-600' : 'text-red-500'}`}>
+                          {stockData.postMarketChange >= 0 ? '+' : ''}{fmtPrice(Math.abs(stockData.postMarketChange))}
+                          &nbsp;({stockData.postMarketChange >= 0 ? '+' : ''}{stockData.postMarketChangePercent.toFixed(2)}%)
+                        </span>
+                      )}
+                    </div>
+                  )}
                 </div>
               </div>
 

@@ -24,6 +24,10 @@ interface InsiderRow  { date: string; name: string; shares: Num; value: Num; des
 interface StockResult {
   ticker: string; interval: string
   currentPrice: number; change: number; changePercent: number; periodChange: number; periodChangePercent: number
+  // ── Extended hours ──
+  marketState: string | null
+  preMarketPrice: Num; preMarketChange: Num; preMarketChangePercent: Num
+  postMarketPrice: Num; postMarketChange: Num; postMarketChangePercent: Num
   // ── Price module ──
   marketCap: Num; peRatio: Num; dividendYield: Pct; high52w: Num; low52w: Num; eps: Num
   // ── Key stats ──
@@ -258,6 +262,9 @@ export async function GET(req: NextRequest) {
     let prevClose    = r2(allBars.length > 1 ? allBars[allBars.length-2].close : currentPrice)
 
     // Nulled-out defaults for all optional fields
+    let marketState: string | null = (meta.marketState as string | undefined) ?? null
+    let preMarketPrice:Num=null, preMarketChange:Num=null, preMarketChangePercent:Num=null
+    let postMarketPrice:Num=null, postMarketChange:Num=null, postMarketChangePercent:Num=null
     let marketCap:Num=null, peRatio:Num=null, dividendYield:Pct=null, high52w:Num=null, low52w:Num=null, eps:Num=null
     let forwardEps:Num=null, priceToBook:Num=null, enterpriseValue:Num=null, enterpriseToRevenue:Num=null
     let enterpriseToEbitda:Num=null, beta:Num=null, shortRatio:Num=null, payoutRatio:Pct=null
@@ -310,6 +317,13 @@ export async function GET(req: NextRequest) {
       if (q.beta != null)                         beta          = Math.round((q.beta as number) * 100) / 100
       if (q.marketCap != null)                    enterpriseValue = q.marketCap as number
       companyName = (q.shortName ?? q.longName ?? q.displayName ?? null) as string | null
+      if (q.marketState != null)               marketState              = q.marketState as string
+      if (q.preMarketPrice != null)            preMarketPrice           = r2(q.preMarketPrice as number)
+      if (q.preMarketChange != null)           preMarketChange          = r2(q.preMarketChange as number)
+      if (q.preMarketChangePercent != null)    preMarketChangePercent   = r2(q.preMarketChangePercent as number)
+      if (q.postMarketPrice != null)           postMarketPrice          = r2(q.postMarketPrice as number)
+      if (q.postMarketChange != null)          postMarketChange         = r2(q.postMarketChange as number)
+      if (q.postMarketChangePercent != null)   postMarketChangePercent  = r2(q.postMarketChangePercent as number)
     }
 
     // ── Parse batch 1 ────────────────────────────────────────────────────────
@@ -480,6 +494,8 @@ export async function GET(req: NextRequest) {
 
     const result: StockResult = {
       ticker, interval, currentPrice, change, changePercent, periodChange, periodChangePercent,
+      marketState, preMarketPrice, preMarketChange, preMarketChangePercent,
+      postMarketPrice, postMarketChange, postMarketChangePercent,
       marketCap, peRatio, dividendYield, high52w, low52w, eps,
       forwardEps, priceToBook, enterpriseValue, enterpriseToRevenue, enterpriseToEbitda,
       beta, shortRatio, payoutRatio, bookValue, heldPercentInsiders, heldPercentInstitutions,
