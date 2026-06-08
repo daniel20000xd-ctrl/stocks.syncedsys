@@ -63,6 +63,23 @@ export async function GET(req: NextRequest) {
     }
   }
 
+  // ── Trading-hours gate ────────────────────────────────────────────────────
+  // NYSE pre-market opens 4am ET, post-market closes 8pm ET.
+  // In UTC that's 08:00–00:00 (EDT, UTC-4) or 09:00–01:00 (EST, UTC-5).
+  // Dead zone between those windows: 02:00–07:59 UTC is always outside any
+  // market session regardless of DST, so we skip it. Weekends too.
+  {
+    const now = new Date()
+    const day = now.getUTCDay()           // 0=Sun 6=Sat
+    const h   = now.getUTCHours()
+    if (day === 0 || day === 6) {
+      return NextResponse.json({ skipped: 'weekend' })
+    }
+    if (h >= 2 && h < 8) {
+      return NextResponse.json({ skipped: 'outside market hours' })
+    }
+  }
+
   const admin      = createAdminClient()
   const ADMIN_EMAIL = process.env.ADMIN_EMAIL ?? 'daniel20000xd@gmail.com'
 
